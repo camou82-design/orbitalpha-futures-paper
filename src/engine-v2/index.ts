@@ -7914,11 +7914,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const isEthInitialEntry = isInitialEntry === true && addOnPolicy.isAddOn !== true;
 
     if (isEthSymbolForExecution && isEthInitialEntry && (finalDecision === "ENTER" || v2DecisionAfterPromotion === "ENTER")) {
-        const isFtsActive =
-            judgment.subtype === "FAST_TREND_SHIFT" ||
-            String(promotionReason ?? "").includes("FAST_TREND_SHIFT") ||
+        const isFtsPromotion = String(promotionReason ?? "").includes("FAST_TREND_SHIFT");
+        const isNativeFtsExecution =
             (execMeta as any)?.fast_trend_shift === true ||
-            (judgment.diagnostics?.fastTrendShift?.active === true && judgment.diagnostics?.fastTrendShift?.direction === v2SideAfterPromotion);
+            execution.metadata?.fast_trend_shift === true ||
+            String(execution.reason ?? "").includes("FAST_TREND_SHIFT");
+
+        const isFtsActive =
+            isFtsPromotion ||
+            (isNativeFtsExecution && (!promotionApplied || isFtsPromotion));
 
         const isTrendPullbackActive =
             judgment.subtype === "TREND_PULLBACK" &&

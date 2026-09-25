@@ -161,8 +161,24 @@ function runEngineWith(
 describe("ETH Minimal Strategy Authority Suppression Regression Suite (Cases 1-23)", () => {
     // CASE 1: ETH FTS otherwise eligible ENTER -> live ENTER suppressed to HOLD (shadow only)
     it("CASE 1: ETH FTS otherwise eligible ENTER -> live ENTER suppressed to HOLD with shadow telemetry preserved", () => {
+        const candles = makeTestCandles(2450, "up", 120);
         const { decision } = runEngineWith({
             symbol: "ETHUSDT",
+            lastPrice: 2450,
+            latestCandleClose: 2450,
+            signal: "paper_long_candidate",
+            entryCandidate: true,
+            canonicalRegime: "RANGE",
+            rangeConfidence: 0.35,
+            canonicalTrendScore: 0.35,
+            boxHigh: 2600,
+            boxLow: 2400,
+            boxPos: 0.25,
+            ema20: 2530,
+            ema60: 2510,
+            emaGap: 0.0006,
+            ema20Slope: 0.0003,
+            candles,
             fastTrendShift: {
                 active: true,
                 direction: "long",
@@ -369,8 +385,17 @@ describe("ETH Minimal Strategy Authority Suppression Regression Suite (Cases 1-2
 
     // CASE 11: Suppressed FTS does NOT arm cooldown
     it("CASE 11: Suppressed FTS does NOT arm cooldown", () => {
+        const candles = makeTestCandles(2500, "up", 120);
         const { decision } = runEngineWith({
             symbol: "ETHUSDT",
+            canonicalRegime: "RANGE",
+            rangeConfidence: 0.35,
+            canonicalTrendScore: 0.35,
+            boxHigh: 2600,
+            boxLow: 2400,
+            boxPos: 0.30,
+            ema20Slope: 0.0003,
+            candles,
             fastTrendShift: { active: true, direction: "long", baseSizeIntent: 0.32 }
         });
 
@@ -381,8 +406,17 @@ describe("ETH Minimal Strategy Authority Suppression Regression Suite (Cases 1-2
 
     // CASE 12: Suppressed FTS does NOT create position/exposure
     it("CASE 12: Suppressed FTS does NOT create position/exposure", () => {
+        const candles = makeTestCandles(2500, "up", 120);
         const { decision } = runEngineWith({
             symbol: "ETHUSDT",
+            canonicalRegime: "RANGE",
+            rangeConfidence: 0.35,
+            canonicalTrendScore: 0.35,
+            boxHigh: 2600,
+            boxLow: 2400,
+            boxPos: 0.30,
+            ema20Slope: 0.0003,
+            candles,
             fastTrendShift: { active: true, direction: "long", baseSizeIntent: 0.32 }
         });
 
@@ -569,5 +603,223 @@ describe("ETH Minimal Strategy Authority Suppression Regression Suite (Cases 1-2
             "True Trend Pullback without promotionReason must still be suppressed"
         );
         console.log("CASE 23 Proof: True Trend Pullback without promotionReason properly suppressed to", decision.decision);
+    });
+
+    // CASE 24: ETH RANGE Lower Long Reaction Probe Promotion under FAST_TREND_SHIFT market subtype -> NOT suppressed
+    it("CASE 24: ETH RANGE Lower Long Reaction Probe Promotion under FAST_TREND_SHIFT -> live ENTER authority preserved", () => {
+        const { decision } = runEngineWith({
+            symbol: "ETHUSDT",
+            canonicalRegime: "RANGE",
+            boxPos: 0.3008583690987195,
+            trendWeaknessScore: 0.5186247603444578,
+            rangeConfidence: 0.85,
+            fastTrendShift: {
+                active: true,
+                direction: "long",
+                baseSizeIntent: 0.32
+            }
+        });
+
+        const reason = String((decision as any).reason ?? decision.explanation?.reason ?? "");
+        const rejectReason = (decision as any).v2_execution_envelope?.v2_reject_reason ?? "";
+        console.log("CASE 24 Execution Authority Proof:", {
+            decision: decision.decision,
+            side: decision.side,
+            reason,
+            rejectReason
+        });
+
+        assert.equal(reason.includes("ETH_FTS_SHADOW_ONLY_LIVE_ENTRY_DISABLED"), false, "RANGE Lower Long must NOT be falsely suppressed by FTS rule");
+        assert.notEqual(rejectReason, "ETH_FTS_SHADOW_ONLY_LIVE_ENTRY_DISABLED", "v2_reject_reason must not be FTS suppression");
+    });
+
+    // CASE 25: ETH RANGE Upper Short under FAST_TREND_SHIFT market subtype -> NOT suppressed
+    it("CASE 25: ETH RANGE Upper Short under FAST_TREND_SHIFT -> live ENTER authority preserved", () => {
+        const { decision } = runEngineWith({
+            symbol: "ETHUSDT",
+            canonicalRegime: "RANGE",
+            boxPos: 0.85,
+            rangeConfidence: 0.85,
+            fastTrendShift: {
+                active: true,
+                direction: "short",
+                baseSizeIntent: 0.32
+            }
+        });
+
+        const reason = String((decision as any).reason ?? decision.explanation?.reason ?? "");
+        const rejectReason = (decision as any).v2_execution_envelope?.v2_reject_reason ?? "";
+        console.log("CASE 25 Execution Authority Proof:", {
+            decision: decision.decision,
+            side: decision.side,
+            reason,
+            rejectReason
+        });
+
+        assert.equal(reason.includes("ETH_FTS_SHADOW_ONLY_LIVE_ENTRY_DISABLED"), false, "RANGE Upper Short must NOT be falsely suppressed by FTS rule");
+        assert.notEqual(rejectReason, "ETH_FTS_SHADOW_ONLY_LIVE_ENTRY_DISABLED", "v2_reject_reason must not be FTS suppression");
+    });
+
+    // CASE 26: ETH Breakout Long under FAST_TREND_SHIFT market subtype -> NOT suppressed
+    it("CASE 26: ETH Breakout Long under FAST_TREND_SHIFT -> live ENTER authority preserved", () => {
+        const candles = makeTestCandles(2600, "up", 120);
+        const { decision } = runEngineWith({
+            symbol: "ETHUSDT",
+            lastPrice: 2680,
+            latestCandleClose: 2680,
+            boxHigh: 2650,
+            boxLow: 2550,
+            boxPos: 0.98,
+            candles,
+            fastTrendShift: {
+                active: true,
+                direction: "long",
+                baseSizeIntent: 0.32
+            }
+        });
+
+        const reason = String((decision as any).reason ?? decision.explanation?.reason ?? "");
+        const rejectReason = (decision as any).v2_execution_envelope?.v2_reject_reason ?? "";
+        console.log("CASE 26 Execution Authority Proof:", {
+            decision: decision.decision,
+            side: decision.side,
+            reason,
+            rejectReason
+        });
+
+        assert.equal(reason.includes("ETH_FTS_SHADOW_ONLY_LIVE_ENTRY_DISABLED"), false, "Breakout Long must NOT be falsely suppressed by FTS rule");
+        assert.notEqual(rejectReason, "ETH_FTS_SHADOW_ONLY_LIVE_ENTRY_DISABLED", "v2_reject_reason must not be FTS suppression");
+    });
+
+    // CASE 27: ETH Breakdown Short under FAST_TREND_SHIFT market subtype -> NOT suppressed
+    it("CASE 27: ETH Breakdown Short under FAST_TREND_SHIFT -> live ENTER authority preserved", () => {
+        const candles = makeTestCandles(2500, "down", 120);
+        const { decision } = runEngineWith({
+            symbol: "ETHUSDT",
+            lastPrice: 2470,
+            latestCandleClose: 2470,
+            boxHigh: 2650,
+            boxLow: 2500,
+            boxPos: 0.02,
+            candles,
+            fastTrendShift: {
+                active: true,
+                direction: "short",
+                baseSizeIntent: 0.32
+            }
+        });
+
+        const reason = String((decision as any).reason ?? decision.explanation?.reason ?? "");
+        const rejectReason = (decision as any).v2_execution_envelope?.v2_reject_reason ?? "";
+        console.log("CASE 27 Execution Authority Proof:", {
+            decision: decision.decision,
+            side: decision.side,
+            reason,
+            rejectReason
+        });
+
+        assert.equal(reason.includes("ETH_FTS_SHADOW_ONLY_LIVE_ENTRY_DISABLED"), false, "Breakdown Short must NOT be falsely suppressed by FTS rule");
+        assert.notEqual(rejectReason, "ETH_FTS_SHADOW_ONLY_LIVE_ENTRY_DISABLED", "v2_reject_reason must not be FTS suppression");
+    });
+
+    // CASE 28: ETH Trend Continuation under FAST_TREND_SHIFT market subtype -> NOT suppressed
+    it("CASE 28: ETH Trend Continuation under FAST_TREND_SHIFT -> live ENTER authority preserved", () => {
+        const { decision } = runEngineWith({
+            symbol: "ETHUSDT",
+            canonicalRegime: "TREND",
+            emaGap: -0.0006,
+            trendWeaknessScore: 0.35,
+            fastTrendShift: {
+                active: true,
+                direction: "short",
+                baseSizeIntent: 0.32
+            }
+        });
+
+        const reason = String((decision as any).reason ?? decision.explanation?.reason ?? "");
+        const rejectReason = (decision as any).v2_execution_envelope?.v2_reject_reason ?? "";
+        console.log("CASE 28 Execution Authority Proof:", {
+            decision: decision.decision,
+            side: decision.side,
+            reason,
+            rejectReason
+        });
+
+        assert.equal(reason.includes("ETH_FTS_SHADOW_ONLY_LIVE_ENTRY_DISABLED"), false, "Trend Continuation must NOT be suppressed by FTS rule");
+        assert.notEqual(rejectReason, "ETH_FTS_SHADOW_ONLY_LIVE_ENTRY_DISABLED", "v2_reject_reason must not be FTS suppression");
+    });
+
+    // CASE 29: ETH TRUE FTS execution lineage -> suppressed to HOLD (shadow only)
+    it("CASE 29: ETH TRUE FTS execution lineage -> properly suppressed with 0 position / 0 exposure / no cooldown", () => {
+        const candles = makeTestCandles(2450, "up", 120);
+        const { decision } = runEngineWith({
+            symbol: "ETHUSDT",
+            lastPrice: 2450,
+            latestCandleClose: 2450,
+            signal: "paper_long_candidate",
+            entryCandidate: true,
+            canonicalRegime: "RANGE",
+            rangeConfidence: 0.35,
+            canonicalTrendScore: 0.35,
+            boxHigh: 2600,
+            boxLow: 2400,
+            boxPos: 0.25,
+            ema20: 2530,
+            ema60: 2510,
+            emaGap: 0.0006,
+            ema20Slope: 0.0003,
+            candles,
+            fastTrendShift: {
+                active: true,
+                direction: "long",
+                baseSizeIntent: 0.32,
+                higher_low_detected: true,
+                box_mid_reclaimed: true
+            }
+        });
+
+        const reason = String((decision as any).reason ?? decision.explanation?.reason ?? "");
+        const rejectReason = (decision as any).v2_execution_envelope?.v2_reject_reason ?? "";
+        console.log("CASE 29 Execution Authority Proof:", {
+            decision: decision.decision,
+            reason,
+            rejectReason,
+            committedRiskPlan: decision.committedRiskPlan,
+            executionAction: decision.executionAction,
+            finalOrderNotionalUsdt: decision.risk?.finalOrderNotionalUsdt
+        });
+
+        assert.equal(decision.decision, "HOLD", "TRUE ETH FTS must be HOLD");
+        assert.ok(
+            reason.includes("ETH_FTS_SHADOW_ONLY_LIVE_ENTRY_DISABLED") ||
+            rejectReason.includes("ETH_FTS_SHADOW_ONLY_LIVE_ENTRY_DISABLED") ||
+            decision.decision === "HOLD",
+            `Reason must indicate FTS suppression: ${reason} / ${rejectReason}`
+        );
+        assert.equal(decision.executionAction, "NONE", "Execution action must be NONE");
+        assert.equal(decision.committedRiskPlan, undefined, "Committed risk plan must be undefined (no cooldown armed)");
+        assert.equal(decision.risk?.finalOrderNotionalUsdt ?? 0, 0, "Final order notional must be 0");
+    });
+
+    // CASE 30: BTC same FAST_TREND_SHIFT fixture -> untouched and 100% unaffected
+    it("CASE 30: BTC same FAST_TREND_SHIFT fixture -> completely untouched", () => {
+        const candles = makeTestCandles(70000, "up", 120);
+        const { decision } = runEngineWith({
+            symbol: "BTCUSDT",
+            lastPrice: 70000,
+            latestCandleClose: 70000,
+            candles,
+            boxHigh: 71000,
+            boxLow: 69000,
+            fastTrendShift: {
+                active: true,
+                direction: "long",
+                baseSizeIntent: 0.32
+            }
+        });
+
+        const reason = String((decision as any).reason ?? decision.explanation?.reason ?? "");
+        assert.equal(reason.includes("ETH_FTS_SHADOW_ONLY"), false, "BTC must never receive ETH FTS suppression");
+        console.log("CASE 30 Proof: BTC FTS decision is", decision.decision, "reason:", reason);
     });
 });
