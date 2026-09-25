@@ -8312,16 +8312,21 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     (v2State as any).okxInstrumentSizing ??
                     (input.state as any).okxInstrumentSizing ??
                     null;
-                // V2 ENTRY: policyRequestedNotionalUsdt is null for non-addon entries.
+                const isEthSymbolForSizing = String(input.symbol).toUpperCase().replace("-SWAP", "").replace("-", "") === "ETHUSDT";
+                const ethInitialTargetNotional = isEthSymbolForSizing && !isAddOn ? 1200 : null;
+                const ethAdverseAddonMaxTarget = isEthSymbolForSizing && isAdverseAddon ? 800 : null;
+                const ethMaxSymbolNotionalCap = isEthSymbolForSizing ? 2000 : null;
+
+                // V2 ENTRY: policyRequestedNotionalUsdt is null for non-addon entries (except ETH initial cap 1200).
                 // Probe multiplier is evaluated and passed via entryProbeSizeMultiplier into evaluateEquityAdaptiveSizing.
                 // Legacy probeCapNotionalUsdt (stageMarginKrwAfter-based absolute anchor) REMOVED.
                 const policyRequestedNotional = isAddOn
                     ? (isAdverseAddon
-                        ? ((v2State as any).requestedAddonNotionalUsdt ??
-                            addOnPolicy?.requestedAddonNotionalUsdt ??
-                            0)
+                        ? (ethAdverseAddonMaxTarget != null
+                            ? Math.min(ethAdverseAddonMaxTarget, (v2State as any).requestedAddonNotionalUsdt ?? addOnPolicy?.requestedAddonNotionalUsdt ?? ethAdverseAddonMaxTarget)
+                            : ((v2State as any).requestedAddonNotionalUsdt ?? addOnPolicy?.requestedAddonNotionalUsdt ?? 0))
                         : ((v2State as any).finalAddonNotionalUsdt ?? finalAddonNotionalUsdt ?? addOnPolicy?.requestedAddonNotionalUsdt ?? addOnPolicy?.addonMaxNotionalUsdt ?? 0))
-                    : null;
+                    : (ethInitialTargetNotional ?? null);
                 const adverseRiskBudgetAllowedNotional = isAdverseAddon
                     ? (addOnPolicy?.requestedAddonNotionalUsdt ??
                         (addOnPolicy as any)?.riskProjection?.riskBudgetAllowedNotional ??
@@ -8401,6 +8406,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                         null
                 });
 
+                const v2HardSafetyCapUsdt = isEthSymbolForSizing
+                    ? ((input.config as any)?.okxLiveV2EthMaxOrderNotionalUsdt ?? (input.config as any)?.okx_live_v2_eth_max_order_notional_usdt ?? 1200)
+                    : ((input.config as any)?.okxLiveV2MaxOrderNotionalUsdt ?? (input.config as any)?.okx_live_v2_max_order_notional_usdt ?? 500);
+
                 const sizingResult = evaluateEquityAdaptiveSizing({
                     symbol: String(input.symbol),
                     side: sideCand === "short" ? "short" : "long",
@@ -8417,7 +8426,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     adverseRiskBudgetAllowedNotional,
                     emergencyAbsoluteCapUsdt,
                     legacyStaticCapUsdt: maxOrderNotionalUsdt,
-                    v2HardSafetyCapUsdt: (input.config as any)?.okxLiveV2MaxOrderNotionalUsdt ?? (input.config as any)?.okx_live_v2_max_order_notional_usdt ?? 500,
+                    v2HardSafetyCapUsdt,
+                    maxSymbolNotionalCapUsdt: ethMaxSymbolNotionalCap,
+                    maxAdverseAddonCapUsdt: ethAdverseAddonMaxTarget,
                     marginReserveRatio,
                     roundTripFeeRate: 0,
                     lastPrice: lastPx,

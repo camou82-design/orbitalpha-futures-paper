@@ -195,6 +195,8 @@ export type EngineConfig = Readonly<{
   okxLiveMaxOrderNotionalUsdt: number | null;
   /** Live signed submit guard for V2: absolute hard safety cap in USDT (default 500). Env: `OKX_LIVE_V2_MAX_ORDER_NOTIONAL_USDT`. */
   okxLiveV2MaxOrderNotionalUsdt?: number | null;
+  /** Live signed submit guard for V2 ETH: absolute hard safety cap in USDT (default 1200). Env: `OKX_LIVE_V2_ETH_MAX_ORDER_NOTIONAL_USDT`. */
+  okxLiveV2EthMaxOrderNotionalUsdt?: number | null;
   /** Live signed submit guard: max add-on order notional in USDT (null if not explicitly configured). */
   okxLiveMaxAddonNotionalUsdt: number | null;
   /** Live signed submit guard: max total symbol notional exposure in USDT (null if not explicitly configured). */

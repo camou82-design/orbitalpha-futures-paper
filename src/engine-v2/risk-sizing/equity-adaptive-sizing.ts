@@ -94,6 +94,10 @@ export type EvaluateEquityAdaptiveSizingInput = Readonly<{
     existingPositionsRisk?: ReadonlyArray<DirectPositionRiskInput> | null;
     /** Explicit flag indicating this is a micro-probe entry. */
     isMicroProbe?: boolean;
+    /** Optional explicit cap on symbol notional (used for symbol-specific total exposure ceiling, e.g. ETH 2000 USDT). */
+    maxSymbolNotionalCapUsdt?: number | null;
+    /** Optional explicit cap on adverse addon notional (e.g. ETH 800 USDT). */
+    maxAdverseAddonCapUsdt?: number | null;
 }>;
 
 export type EquityAdaptiveSizingResult = Readonly<{
@@ -233,7 +237,7 @@ export function resolveUltimateSafetyCapForOrderSizing(input: Readonly<{
 }>): LiveOrderNotionalCapResolution & { v2HardSafetyCapUsdt: number | null } {
     const emergencyCapUsdt = positiveCapUsdt(input.emergencyCapUsdt);
     const legacyStaticCapUsdt = positiveCapUsdt(input.legacyStaticCapUsdt);
-    const v2HardSafetyCapUsdt = positiveCapUsdt(input.v2HardSafetyCapUsdt) ?? 500;
+    const v2HardSafetyCapUsdt = positiveCapUsdt(input.v2HardSafetyCapUsdt);
     const activeEmergencyCap = input.emergencyFailsafeActive === true ? emergencyCapUsdt : null;
 
     let effectiveLiveCapUsdt: number | null = null;
@@ -241,13 +245,19 @@ export function resolveUltimateSafetyCapForOrderSizing(input: Readonly<{
 
     if (input.v2AuthorityEntry === true) {
         // V2 Authority Entry: Legacy 40 USDT cap is bypassed.
-        // It uses v2HardSafetyCapUsdt (default 500), or activeEmergencyCap if emergency failsafe is active.
-        if (activeEmergencyCap != null) {
+        // It uses v2HardSafetyCapUsdt when provided, or activeEmergencyCap if emergency failsafe is active.
+        if (activeEmergencyCap != null && v2HardSafetyCapUsdt != null) {
             effectiveLiveCapUsdt = Math.min(activeEmergencyCap, v2HardSafetyCapUsdt);
             legacyCapSource = "OKX_LIVE_EMERGENCY_MAX_ORDER_NOTIONAL_USDT_FAILSAFE";
-        } else {
+        } else if (activeEmergencyCap != null) {
+            effectiveLiveCapUsdt = activeEmergencyCap;
+            legacyCapSource = "OKX_LIVE_EMERGENCY_MAX_ORDER_NOTIONAL_USDT_FAILSAFE";
+        } else if (v2HardSafetyCapUsdt != null) {
             effectiveLiveCapUsdt = v2HardSafetyCapUsdt;
             legacyCapSource = "OKX_LIVE_V2_MAX_ORDER_NOTIONAL_USDT_HARD_SAFETY_CAP";
+        } else {
+            effectiveLiveCapUsdt = null;
+            legacyCapSource = null;
         }
     } else {
         // Non-V2 / Legacy Entry: OKX_LIVE_MAX_ORDER_NOTIONAL_USDT (legacy 40 USDT) applies.
@@ -388,9 +398,13 @@ export function evaluateEquityAdaptiveSizing(
             ? qualityMultiplierFromGrade(input.entryQualityGrade)
             : 1.0;
     const equityInitialCapUsdt = equity * MAX_INITIAL_NOTIONAL_EQUITY_MULTIPLE;
-    const symbolCapUsdt = equity * MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE;
+    const symbolCapUsdt = input.maxSymbolNotionalCapUsdt != null && input.maxSymbolNotionalCapUsdt > 0
+        ? Math.min(equity * MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE, input.maxSymbolNotionalCapUsdt)
+        : equity * MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE;
     const accountCapUsdt = equity * MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE;
-    const maxAdverseAddonUsdt = equity * MAX_ADVERSE_ADDON_EQUITY_MULTIPLE;
+    const maxAdverseAddonUsdt = input.maxAdverseAddonCapUsdt != null && input.maxAdverseAddonCapUsdt > 0
+        ? input.maxAdverseAddonCapUsdt
+        : equity * MAX_ADVERSE_ADDON_EQUITY_MULTIPLE;
     const marginReserveRatio = input.marginReserveRatio ?? MARGIN_RESERVE_RATIO_DEFAULT;
     const usableAvailableBalanceUsdt = input.availableBalanceUsdt * (1 - marginReserveRatio);
     const availableBalanceCapUsdt =
@@ -399,7 +413,8 @@ export function evaluateEquityAdaptiveSizing(
         v2AuthorityEntry: input.v2AuthorityEntry === true,
         emergencyFailsafeActive: input.emergencyFailsafeActive === true,
         emergencyCapUsdt: input.emergencyAbsoluteCapUsdt,
-        legacyStaticCapUsdt: input.legacyStaticCapUsdt
+        legacyStaticCapUsdt: input.legacyStaticCapUsdt,
+        v2HardSafetyCapUsdt: input.v2HardSafetyCapUsdt
     });
     const ultimateSafetyCapUsdt = emergency.effectiveLiveCapUsdt;
     const emergencyCapApplied = ultimateSafetyCapUsdt != null;

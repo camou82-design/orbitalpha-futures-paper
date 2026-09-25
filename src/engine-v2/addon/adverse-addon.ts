@@ -258,9 +258,10 @@ export function evaluateConfirmedAdverseAddOn(
         });
     }
     const accountEquityUsd = accountEquityUsdRaw;
-    const symbolMaxNotional = accountEquityUsd * 1.0;
+    const isEthSymbol = String(args.symbol ?? "").toUpperCase().replace("-SWAP", "").replace("-", "") === "ETHUSDT";
+    const symbolMaxNotional = isEthSymbol ? Math.min(accountEquityUsd * 1.0, 2000) : accountEquityUsd * 1.0;
     const globalMaxNotional = accountEquityUsd * 1.5;
-    const maxAdverseAddonUsd = accountEquityUsd * 0.25;
+    const maxAdverseAddonUsd = isEthSymbol ? 800 : accountEquityUsd * 0.25;
 
     const currentSymbolNotionalUsd = args.currentSymbolNotionalUsd || 0;
     const currentGlobalNotionalUsd = args.currentGlobalNotionalUsd || currentSymbolNotionalUsd;
