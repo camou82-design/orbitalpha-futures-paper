@@ -5684,11 +5684,28 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             judgment.subtype === "EARLY_SHORT_PROBE" ||
             execMetaRecord.fast_trend_shift === true ||
             execMetaRecord.early_probe === true);
+    const isNonRangeExecutionLineage =
+        isTrendAuthorityCandidate ||
+        rangeZoneVetoExempt ||
+        isConflictResolvedTrendLongPromotion ||
+        isConflictResolvedTrendShortPromotion ||
+        nativeExecutorFastProbeCoverage ||
+        (nativeExecutorEnterAuthority && (
+            String(execution.reason ?? "").toLowerCase().includes("trend") ||
+            String(execution.reason ?? "").toLowerCase().includes("continuation") ||
+            String(execution.reason ?? "").toLowerCase().includes("breakout") ||
+            String(execution.reason ?? "").toLowerCase().includes("breakdown") ||
+            String(execution.reason ?? "").toLowerCase().includes("fast_shift") ||
+            String(judgment.subtype ?? "").includes("TREND") ||
+            String(judgment.subtype ?? "").includes("BREAKOUT") ||
+            String(judgment.subtype ?? "").includes("BREAKDOWN") ||
+            execMetaRecord.trend_continuation === true ||
+            execMetaRecord.fast_trend_shift === true
+        ));
+
     const rangeLowerShortMismatchBeforeExemption =
         isRangeRouting &&
-        !rangeZoneVetoExempt &&
-        !isTrendAuthorityCandidate &&
-        !isConflictResolvedTrendShortPromotion &&
+        !isNonRangeExecutionLineage &&
         sideCandidateBeforeVeto === "short" &&
         (rangeLowerShortMismatchByReason || (boxPos ?? 0.5) <= rangeLowerThreshold);
     const nativeFtsLowerShortDeferZoneVeto =
@@ -5805,9 +5822,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
               null;
     const rangeUpperLongMismatchBeforeExemption =
         isRangeRouting &&
-        !rangeZoneVetoExempt &&
-        !isTrendAuthorityCandidate &&
-        !isConflictResolvedTrendLongPromotion &&
+        !isNonRangeExecutionLineage &&
         sideCandidateBeforeVeto === "long" &&
         (rangeUpperLongMismatchByReason || (boxPos ?? 0.5) >= rangeUpperThreshold);
     const rangeUpperLongMismatch =
@@ -5848,9 +5863,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         !relaxedRangeEntry &&
         !rangeEdgeExtreme &&
         !shockRecoveryHint &&
-        !rangeZoneVetoExempt &&
-        !isTrendAuthorityCandidate &&
-        !nativeExecutorFastProbeCoverage;
+        !isNonRangeExecutionLineage;
 
     if (v2DecisionAfterPromotion === "ENTER") {
         if (rangeLowerShortMismatch && !execMeta.sideOverrideApplied) {

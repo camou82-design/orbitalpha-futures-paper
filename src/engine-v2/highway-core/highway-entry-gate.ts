@@ -224,8 +224,26 @@ export function evaluateHighwayCoreEntryGate(input: HighwayEntryGateInput): High
 
     // Step 2: 위치 (Position / Location / Structure)
     if (allowed) {
-        if (regime === "RANGE" && boxPos !== null) {
-            // RANGE: Suppress box middle chase. Only allow entry evaluation at edges.
+        const executionReasonStr = String(execution?.reason ?? "").toLowerCase();
+        const execMeta = (execution?.metadata ?? {}) as Record<string, unknown>;
+        const subtypeStr = String(subtype ?? "");
+        const isNonRangeLineage =
+            subtypeStr === "FAST_TREND_SHIFT" ||
+            subtypeStr === "EARLY_LONG_PROBE" ||
+            subtypeStr === "EARLY_SHORT_PROBE" ||
+            subtypeStr.includes("TREND") ||
+            subtypeStr.includes("BREAKOUT") ||
+            subtypeStr.includes("BREAKDOWN") ||
+            executionReasonStr.includes("trend") ||
+            executionReasonStr.includes("continuation") ||
+            executionReasonStr.includes("breakout") ||
+            executionReasonStr.includes("breakdown") ||
+            executionReasonStr.includes("fast_shift") ||
+            execMeta.trend_continuation === true ||
+            execMeta.fast_trend_shift === true;
+
+        if (regime === "RANGE" && !isNonRangeLineage && boxPos !== null) {
+            // RANGE: Suppress box middle chase. Only allow entry evaluation at edges for canonical RANGE mean-reversion.
             if (side === "long" && boxPos > 0.35) {
                 allowed = false;
                 finalDecision = "SKIP";
@@ -235,14 +253,16 @@ export function evaluateHighwayCoreEntryGate(input: HighwayEntryGateInput): High
                 finalDecision = "SKIP";
                 rejectReason = "RANGE_MIDDLE_CHASE_BLOCKED_SHORT";
             }
-        } else if (regime === "TREND" || subtype === "FAST_TREND_SHIFT") {
-            // TREND / FAST_TREND_SHIFT: Do not blindly chase extreme tops/bottoms without retest/reclaim
+        } else if (regime === "TREND" || subtype === "FAST_TREND_SHIFT" || isNonRangeLineage) {
+            // TREND / FAST_TREND_SHIFT / NON_RANGE: Do not blindly chase extreme tops/bottoms without retest/reclaim
             const meta = (execution?.metadata ?? {}) as Record<string, unknown>;
             const hasStructureEvidence =
                 meta.retestConfirmed === true ||
                 meta.reclaimConfirmed === true ||
                 meta.pullbackConfirmed === true ||
-                meta.continuationPhase === "RETEST_TOUCHED";
+                meta.continuationPhase === "RETEST_TOUCHED" ||
+                meta.fast_trend_shift === true ||
+                meta.early_probe === true;
 
             const tw = Number(snapshot?.trendWeaknessScore ?? 0);
             if (side === "long" && boxPos !== null && boxPos > 0.90 && tw > 0.60 && !hasStructureEvidence) {
