@@ -481,4 +481,115 @@ test("V2 OKX Today Fills vs Today Closed Trades Suite (9/23 Audit Fixture & UI C
     assert.equal(canonicalBtc[0].sourceLabel, "자동");
     assert.ok(["자동", "수동"].includes(canonicalEth[0].sourceLabel));
   });
+
+  await t.test("10. Complete 12-Case Regression Suite for OKX Fill Lifecycle & Role Truth", () => {
+    // 1. Flat -> Long: ENTRY
+    const t1 = normalizeOkxRawFills([{ instId: "BTC-USDT-SWAP", side: "buy", fillSz: "1", fillTime: 1000, clOrdId: "p_test" }]);
+    assert.equal(t1[0].fillRole, "ENTRY");
+    assert.equal(t1[0].fillTypeLabel, "진입");
+    assert.equal(t1[0].sourceLabel, "자동");
+
+    // 2. Flat -> Short: ENTRY
+    const t2 = normalizeOkxRawFills([{ instId: "BTC-USDT-SWAP", side: "sell", fillSz: "1", fillTime: 1000, clOrdId: "p_test" }]);
+    assert.equal(t2[0].fillRole, "ENTRY");
+    assert.equal(t2[0].fillTypeLabel, "진입");
+
+    // 3. Existing Long + Buy: ADDON
+    const t3 = normalizeOkxRawFills([
+      { instId: "BTC-USDT-SWAP", side: "buy", fillSz: "1", fillTime: 1000, ordId: "1" },
+      { instId: "BTC-USDT-SWAP", side: "buy", fillSz: "0.5", fillTime: 2000, ordId: "2" }
+    ]);
+    assert.equal(t3.find((x) => x.ordId === "2")!.fillRole, "ADDON");
+    assert.equal(t3.find((x) => x.ordId === "2")!.fillTypeLabel, "추가진입");
+
+    // 4. Existing Short + Sell: ADDON
+    const t4 = normalizeOkxRawFills([
+      { instId: "BTC-USDT-SWAP", side: "sell", fillSz: "1", fillTime: 1000, ordId: "1" },
+      { instId: "BTC-USDT-SWAP", side: "sell", fillSz: "0.5", fillTime: 2000, ordId: "2" }
+    ]);
+    assert.equal(t4.find((x) => x.ordId === "2")!.fillRole, "ADDON");
+
+    // 5. Long 일부 Sell: PARTIAL_EXIT
+    const t5 = normalizeOkxRawFills([
+      { instId: "BTC-USDT-SWAP", side: "buy", fillSz: "1", fillTime: 1000, ordId: "1" },
+      { instId: "BTC-USDT-SWAP", side: "sell", fillSz: "0.4", fillTime: 2000, ordId: "2" }
+    ]);
+    assert.equal(t5.find((x) => x.ordId === "2")!.fillRole, "PARTIAL_EXIT");
+    assert.equal(t5.find((x) => x.ordId === "2")!.fillTypeLabel, "부분청산");
+
+    // 6. Short 일부 Buy: PARTIAL_EXIT
+    const t6 = normalizeOkxRawFills([
+      { instId: "BTC-USDT-SWAP", side: "sell", fillSz: "1", fillTime: 1000, ordId: "1" },
+      { instId: "BTC-USDT-SWAP", side: "buy", fillSz: "0.4", fillTime: 2000, ordId: "2" }
+    ]);
+    assert.equal(t6.find((x) => x.ordId === "2")!.fillRole, "PARTIAL_EXIT");
+
+    // 7. Long 전량 Sell -> Flat: FULL_EXIT
+    const t7 = normalizeOkxRawFills([
+      { instId: "BTC-USDT-SWAP", side: "buy", fillSz: "1", fillTime: 1000, ordId: "1" },
+      { instId: "BTC-USDT-SWAP", side: "sell", fillSz: "1", fillTime: 2000, ordId: "2" }
+    ]);
+    assert.equal(t7.find((x) => x.ordId === "2")!.fillRole, "FULL_EXIT");
+    assert.equal(t7.find((x) => x.ordId === "2")!.fillTypeLabel, "청산완료");
+
+    // 8. Short 전량 Buy -> Flat: FULL_EXIT
+    const t8 = normalizeOkxRawFills([
+      { instId: "BTC-USDT-SWAP", side: "sell", fillSz: "1", fillTime: 1000, ordId: "1" },
+      { instId: "BTC-USDT-SWAP", side: "buy", fillSz: "1", fillTime: 2000, ordId: "2" }
+    ]);
+    assert.equal(t8.find((x) => x.ordId === "2")!.fillRole, "FULL_EXIT");
+
+    // 9. 동일 ordId multiple fills: full exit order inherits FULL_EXIT across all sub-fills
+    const t9 = normalizeOkxRawFills([
+      { instId: "BTC-USDT-SWAP", side: "buy", fillSz: "1", fillTime: 1000, ordId: "1", tradeId: "t1" },
+      { instId: "BTC-USDT-SWAP", side: "sell", fillSz: "0.5", fillTime: 2000, ordId: "2", tradeId: "t2" },
+      { instId: "BTC-USDT-SWAP", side: "sell", fillSz: "0.5", fillTime: 2001, ordId: "2", tradeId: "t3" }
+    ]);
+    assert.equal(t9.find((x) => x.tradeId === "t2")!.fillRole, "FULL_EXIT");
+    assert.equal(t9.find((x) => x.tradeId === "t3")!.fillRole, "FULL_EXIT");
+
+    // 10. Manual fill
+    const t10 = normalizeOkxRawFills([{ instId: "BTC-USDT-SWAP", side: "buy", fillSz: "1", fillTime: 1000 }]);
+    assert.equal(t10[0].sourceLabel, "수동");
+
+    // 11. Engine-generated fill
+    const t11 = normalizeOkxRawFills([{ instId: "BTC-USDT-SWAP", side: "buy", fillSz: "1", fillTime: 1000, clOrdId: "pBTCUSDTsmugbf107b10953b1" }]);
+    assert.equal(t11[0].sourceLabel, "자동");
+
+    // 12. Actual BTC 9/25 Fixture
+    const btcFixture = [
+      {
+        instId: "BTC-USDT-SWAP",
+        side: "sell",
+        fillSz: "0.59",
+        fillPx: "84570.1",
+        ordId: "3952689161818869760",
+        clOrdId: "pBTCUSDTsmugbf107b10953b1",
+        fillTime: 1787680916000,
+        fee: "-0.249481795"
+      },
+      {
+        instId: "BTC-USDT-SWAP",
+        side: "buy",
+        fillSz: "0.59",
+        fillPx: "84791.6",
+        ordId: "3952689170000000000",
+        clOrdId: "slpos_btc_close",
+        fillTime: 1787681078000,
+        fillPnl: "-1.30685",
+        fee: "-0.25013522"
+      }
+    ];
+    const t12 = normalizeOkxRawFills(btcFixture);
+    const entry = t12.find((x) => x.ordId === "3952689161818869760")!;
+    const exit = t12.find((x) => x.ordId === "3952689170000000000")!;
+
+    assert.equal(entry.fillRole, "ENTRY");
+    assert.equal(entry.fillTypeLabel, "진입");
+    assert.equal(entry.sourceLabel, "자동");
+
+    assert.equal(exit.fillRole, "FULL_EXIT");
+    assert.equal(exit.fillTypeLabel, "청산완료");
+    assert.equal(exit.sourceLabel, "자동");
+  });
 });

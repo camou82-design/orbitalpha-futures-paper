@@ -1301,6 +1301,36 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 ts: Date.now()
             }));
         }
+
+        if (String(input.symbol).toUpperCase().includes("ETH")) {
+            const twScore = typeof (judgment as any).trendWeaknessScore === "number" ? (judgment as any).trendWeaknessScore : Number((authoritativeInput.snapshot as any)?.trendWeaknessScore ?? 0);
+            const isEligible = (execution.signal === "LONG_CANDIDATE" || execution.signal === "SHORT_CANDIDATE") && Number(execution.baseSizeIntent ?? 0) > 0;
+            const isSelected = isEligible && twScore <= 0.20;
+
+            if (shouldEmitV2Proof("ETHUSDT_FTS_FORWARD_SHADOW_PROOF", String(input.symbol), String(execution.side), true)) {
+                console.info(JSON.stringify({
+                    event: "ETHUSDT_FTS_FORWARD_SHADOW_PROOF",
+                    symbol: String(input.symbol),
+                    side: execution.side,
+                    raw_fts_event: true,
+                    production_eligible_fts_event: Boolean(isEligible),
+                    selected_fts_event: Boolean(isSelected),
+                    selected_reason: isSelected ? "FTS_TREND_WEAKNESS_SCORE_LTE_0_20" : (!isEligible ? "BLOCKED_BY_PRODUCTION_GUARDS" : "SCORE_EXCEEDS_0_20"),
+                    trend_weakness_score: twScore,
+                    production_entry_px: authoritativeInput.snapshot.lastPrice,
+                    production_exit_px: null,
+                    production_exit_reason: null,
+                    shadow_variant_b_exit_px: null,
+                    shadow_variant_b_holding_ms: null,
+                    shadow_gross_pnl: null,
+                    shadow_net_pnl_median_cost: null,
+                    shadow_net_pnl_p75_cost: null,
+                    passive_tp1_status: "INDETERMINATE",
+                    passive_tp1_fill_evidence: "OBSERVING_REAL_ORDERBOOK_QUEUE",
+                    ts: Date.now()
+                }));
+            }
+        }
     }
 
     if (

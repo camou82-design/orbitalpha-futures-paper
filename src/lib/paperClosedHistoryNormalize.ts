@@ -867,7 +867,7 @@ export function normalizeOkxRawFills(fills: readonly any[]): NormalizedOkxRawFil
     }
   }
 
-  // Group by symbol to track currentQty sequence for role classification
+  // Group by symbol to track position lifecycle sequence
   const bySymbol = new Map<string, any[]>();
   for (const f of dedupMap.values()) {
     const instId = String(f.instId ?? "").trim().toUpperCase();
@@ -880,97 +880,146 @@ export function normalizeOkxRawFills(fills: readonly any[]): NormalizedOkxRawFil
   const QTY_EPS = 1e-9;
 
   for (const [symbol, symFills] of bySymbol.entries()) {
-    // Sort chronologically ascending
-    const sorted = [...symFills].sort((a, b) => {
-      const ta = Number(a.fillTime) || 0;
-      const tb = Number(b.fillTime) || 0;
+    // Group fills by ordId to evaluate order-level lifecycle truth
+    const orderGroups = new Map<string, any[]>();
+    for (const f of symFills) {
+      const ordId = String(f.ordId ?? "").trim();
+      const groupKey = ordId.length > 0 ? ordId : `trade_${f.tradeId ?? f.fillTime}`;
+      if (!orderGroups.has(groupKey)) {
+        orderGroups.set(groupKey, []);
+      }
+      orderGroups.get(groupKey)!.push(f);
+    }
+
+    // Sort order groups chronologically by their earliest fillTime
+    const sortedOrders = Array.from(orderGroups.values()).sort((a, b) => {
+      const ta = Math.min(...a.map((x) => Number(x.fillTime) || 0));
+      const tb = Math.min(...b.map((x) => Number(x.fillTime) || 0));
       if (ta !== tb) return ta - tb;
-      return String(a.tradeId || a.ordId || "").localeCompare(String(b.tradeId || b.ordId || ""));
+      return String(a[0].ordId || a[0].tradeId || "").localeCompare(String(b[0].ordId || b[0].tradeId || ""));
     });
 
     let currentQty = 0;
 
-    for (const fill of sorted) {
-      const fillSz = Number(fill.fillSz) || 0;
-      const fillPx = Number(fill.fillPx) || 0;
-      const fillTime = Number(fill.fillTime) || 0;
-      const side = String(fill.side ?? "").trim().toLowerCase();
-      const clOrdId = typeof fill.clOrdId === "string" ? fill.clOrdId.trim() : undefined;
-      const ordId = String(fill.ordId ?? "").trim();
-      const tradeId = String(fill.tradeId ?? "").trim();
-      const instId = String(fill.instId ?? `${symbol}-USDT-SWAP`);
-      const posSide = typeof fill.posSide === "string" ? fill.posSide.trim() : undefined;
-      const fee = fill.fee !== undefined ? Number(fill.fee) : undefined;
-      const feeCcy = typeof fill.feeCcy === "string" ? fill.feeCcy : undefined;
-      const fillPnl = fill.fillPnl !== undefined && String(fill.fillPnl).trim() !== "" ? Number(fill.fillPnl) : undefined;
-      const execType = typeof fill.execType === "string" ? fill.execType : undefined;
+    for (const orderFills of sortedOrders) {
+      // Sort fills within the order chronologically
+      orderFills.sort((a, b) => {
+        const ta = Number(a.fillTime) || 0;
+        const tb = Number(b.fillTime) || 0;
+        if (ta !== tb) return ta - tb;
+        return String(a.tradeId || "").localeCompare(String(b.tradeId || ""));
+      });
 
-      // Detect auto (BOT_V2 / algo) vs manual
-      const isBot =
-        Boolean(clOrdId) &&
-        (/^p[A-Z0-9_-]+/i.test(clOrdId!) ||
-          /^slpos[A-Z0-9_-]+/i.test(clOrdId!) ||
-          /^tppos[A-Z0-9_-]+/i.test(clOrdId!) ||
-          /^v2[A-Z0-9_-]+/i.test(clOrdId!) ||
-          /^O\d{10,}/.test(clOrdId!));
-      const sourceLabel: "자동" | "수동" = isBot ? "자동" : "수동";
+      const orderTotalSz = orderFills.reduce((sum, f) => sum + (Number(f.fillSz) || 0), 0);
+      const side = String(orderFills[0].side ?? "").trim().toLowerCase();
+      const orderSigned = side === "buy" ? orderTotalSz : -orderTotalSz;
 
-      let fillTypeLabel: "진입" | "추가진입" | "부분청산" | "청산완료" = "진입";
-      let fillRole: "ENTRY" | "ADDON" | "PARTIAL_EXIT" | "FULL_EXIT" = "ENTRY";
+      const hasBotClOrdId = orderFills.some((f) => {
+        const cl = String(f.clOrdId ?? "").trim();
+        return (
+          Boolean(cl) &&
+          (/^p[A-Z0-9_-]+/i.test(cl) ||
+            /^slpos[A-Z0-9_-]+/i.test(cl) ||
+            /^tppos[A-Z0-9_-]+/i.test(cl) ||
+            /^v2[A-Z0-9_-]+/i.test(cl) ||
+            /^O\d{10,}/.test(cl) ||
+            /^[a-z0-9_-]*v2/i.test(cl) ||
+            /^algo/i.test(cl))
+        );
+      });
 
-      const fillSigned = side === "buy" ? fillSz : -fillSz;
+      const hasExplicitClose = orderFills.some((f) => {
+        const cl = String(f.clOrdId ?? "").trim();
+        const pnl = f.fillPnl !== undefined && String(f.fillPnl).trim() !== "" ? Number(f.fillPnl) : NaN;
+        return (
+          /^slpos/i.test(cl) ||
+          /^tppos/i.test(cl) ||
+          /^O\d{10,}/.test(cl) ||
+          /close/i.test(cl) ||
+          (!Number.isNaN(pnl) && pnl !== 0)
+        );
+      });
+
+      let orderRole: "ENTRY" | "ADDON" | "PARTIAL_EXIT" | "FULL_EXIT" = "ENTRY";
+      let orderTypeLabel: "진입" | "추가진입" | "부분청산" | "청산완료" = "진입";
 
       if (Math.abs(currentQty) <= QTY_EPS) {
-        // Position was flat -> this is new entry
-        fillTypeLabel = "진입";
-        fillRole = "ENTRY";
-        currentQty = fillSigned;
-      } else if (Math.sign(currentQty) === Math.sign(fillSigned)) {
-        // Adding in same direction -> addon
-        fillTypeLabel = "추가진입";
-        fillRole = "ADDON";
-        currentQty += fillSigned;
+        orderRole = "ENTRY";
+        orderTypeLabel = "진입";
+        currentQty = orderSigned;
+      } else if (Math.sign(currentQty) === Math.sign(orderSigned)) {
+        orderRole = "ADDON";
+        orderTypeLabel = "추가진입";
+        currentQty += orderSigned;
       } else {
-        // Opposite direction -> reducing
         const currentAbs = Math.abs(currentQty);
-        if (currentAbs > fillSz + QTY_EPS) {
-          // Partial reduction (e.g. TP1)
-          fillTypeLabel = "부분청산";
-          fillRole = "PARTIAL_EXIT";
-          currentQty += fillSigned;
-        } else if (Math.abs(currentAbs - fillSz) <= QTY_EPS) {
-          // Full close
-          fillTypeLabel = "청산완료";
-          fillRole = "FULL_EXIT";
+        if (currentAbs > orderTotalSz + QTY_EPS) {
+          orderRole = "PARTIAL_EXIT";
+          orderTypeLabel = "부분청산";
+          currentQty += orderSigned;
+        } else if (
+          Math.abs(currentAbs - orderTotalSz) <= QTY_EPS ||
+          (hasExplicitClose && orderTotalSz >= currentAbs - QTY_EPS)
+        ) {
+          orderRole = "FULL_EXIT";
+          orderTypeLabel = "청산완료";
           currentQty = 0;
         } else {
-          // Flip / Reversal
-          fillTypeLabel = "청산완료";
-          fillRole = "FULL_EXIT";
-          currentQty = side === "buy" ? fillSz - currentAbs : -(fillSz - currentAbs);
+          orderRole = "FULL_EXIT";
+          orderTypeLabel = "청산완료";
+          currentQty = side === "buy" ? orderTotalSz - currentAbs : -(orderTotalSz - currentAbs);
         }
       }
 
-      output.push({
-        tradeId,
-        ordId,
-        clOrdId,
-        instId,
-        symbol,
-        side,
-        posSide,
-        fillSz,
-        fillPx,
-        fillTime,
-        fillTimeKst: formatKstTime(fillTime),
-        fillPnl,
-        fee,
-        feeCcy,
-        execType,
-        sourceLabel,
-        fillTypeLabel,
-        fillRole
-      });
+      for (const fill of orderFills) {
+        const fillSz = Number(fill.fillSz) || 0;
+        const fillPx = Number(fill.fillPx) || 0;
+        const fillTime = Number(fill.fillTime) || 0;
+        const fillSide = String(fill.side ?? "").trim().toLowerCase();
+        const clOrdId = typeof fill.clOrdId === "string" ? fill.clOrdId.trim() : undefined;
+        const ordId = String(fill.ordId ?? "").trim();
+        const tradeId = String(fill.tradeId ?? "").trim();
+        const instId = String(fill.instId ?? `${symbol}-USDT-SWAP`);
+        const posSide = typeof fill.posSide === "string" ? fill.posSide.trim() : undefined;
+        const fee = fill.fee !== undefined ? Number(fill.fee) : undefined;
+        const feeCcy = typeof fill.feeCcy === "string" ? fill.feeCcy : undefined;
+        const fillPnl =
+          fill.fillPnl !== undefined && String(fill.fillPnl).trim() !== "" ? Number(fill.fillPnl) : undefined;
+        const execType = typeof fill.execType === "string" ? fill.execType : undefined;
+
+        const isBot =
+          hasBotClOrdId ||
+          (Boolean(clOrdId) &&
+            (/^p[A-Z0-9_-]+/i.test(clOrdId!) ||
+              /^slpos[A-Z0-9_-]+/i.test(clOrdId!) ||
+              /^tppos[A-Z0-9_-]+/i.test(clOrdId!) ||
+              /^v2[A-Z0-9_-]+/i.test(clOrdId!) ||
+              /^O\d{10,}/.test(clOrdId!) ||
+              /^[a-z0-9_-]*v2/i.test(clOrdId!) ||
+              /^algo/i.test(clOrdId!)));
+        const sourceLabel: "자동" | "수동" = isBot ? "자동" : "수동";
+
+        output.push({
+          tradeId,
+          ordId,
+          clOrdId,
+          instId,
+          symbol,
+          side: fillSide,
+          posSide,
+          fillSz,
+          fillPx,
+          fillTime,
+          fillTimeKst: formatKstTime(fillTime),
+          fillPnl,
+          fee,
+          feeCcy,
+          execType,
+          sourceLabel,
+          fillTypeLabel: orderTypeLabel,
+          fillRole: orderRole
+        });
+      }
     }
   }
 
