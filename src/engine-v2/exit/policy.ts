@@ -42,9 +42,19 @@ function isPriorDefensiveReduce(reason: unknown): boolean {
     return (
         r.includes("PNL_STOP_PROTECT") ||
         r.includes("SHOCK_PROTECTIVE_REDUCE") ||
+        r.includes("SHOCK_FULL_EXIT_AGAINST_POSITION") ||
         r.includes("TRANSITION_REDUCE_ON_CONFLICT") ||
         r.includes("DEFENSIVE") ||
         r.includes("PROTECTIVE_REDUCE")
+    );
+}
+
+function isPriorShockDefensiveReduce(reason: unknown): boolean {
+    const r = String(reason ?? "").toUpperCase();
+    return (
+        r.includes("SHOCK_PROTECTIVE_REDUCE") ||
+        r.includes("SHOCK_FULL_EXIT_AGAINST_POSITION") ||
+        (r.includes("SHOCK") && (r.includes("REDUCE") || r.includes("DEFENSIVE")))
     );
 }
 
@@ -275,6 +285,9 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
         isPriorDefensiveReduce(pos?.lastReduceReason) ||
         (typeof pos?.protectivePartialReduceCount === "number" && pos.protectivePartialReduceCount > 0);
 
+    const priorShockDefensiveReduce =
+        isPriorShockDefensiveReduce(pos?.lastReduceReason);
+
     let action: V2ExitPolicyResult["action"] = "HOLD";
     let reason: V2ExitPolicyResult["reason"] = "NO_EXIT_SIGNAL";
     let reduceRatio = 0;
@@ -338,10 +351,53 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
             reduceRatio = 0;
             evidence += "|adverse_shock_micro_noise_watch";
         } else {
-            action = "FULL_EXIT";
-            reason = "SHOCK_FULL_EXIT_AGAINST_POSITION";
-            reduceRatio = 1;
-            evidence += "|shock_full_exit_against_meaningful_move";
+            // [PHASE 2A]: When Protective SL is authoritatively confirmed and active on the exchange,
+            // shock-only condition must NOT trigger a 100% terminal FULL_EXIT.
+            // Downgrade to 1-time defensive REDUCE 35% with repeat suppression.
+            // PROVISIONAL_PROTECTED and UNPROTECTED maintain the existing FULL_EXIT fail-safe.
+            const protectiveSlAuthoritativelyConfirmed =
+                pnlGateResult.exchangeProtectionState === "CONFIRMED" &&
+                pnlGateResult.exchangeSlAuthoritativelyConfirmed === true &&
+                pnlGateResult.ledgerStopPx != null &&
+                pnlGateResult.ledgerStopPx > 0;
+
+            const originalExitAction = "FULL_EXIT";
+            const originalExitReason = "SHOCK_FULL_EXIT_AGAINST_POSITION";
+
+            if (protectiveSlAuthoritativelyConfirmed) {
+                if (priorShockDefensiveReduce) {
+                    action = "WATCH";
+                    reason = "TRANSITION_PROTECTIVE_WATCH";
+                    reduceRatio = 0;
+                    evidence += "|repeat_shock_defensive_reduce_suppressed";
+                } else {
+                    action = "REDUCE";
+                    reason = "SHOCK_FULL_EXIT_AGAINST_POSITION";
+                    reduceRatio = 0.35;
+                    evidence += "|shock_full_exit_downgraded_to_reduce:sl_confirmed";
+                }
+            } else {
+                action = "FULL_EXIT";
+                reason = "SHOCK_FULL_EXIT_AGAINST_POSITION";
+                reduceRatio = 1;
+                evidence += "|shock_full_exit_unprotected_exchange_sl";
+            }
+
+            console.info(JSON.stringify({
+                event: "V2_SHOCK_EXIT_AUTHORITY_AUDIT_PROOF",
+                symbol: String(args.symbol),
+                side,
+                shock_against: shockAgainst,
+                adverse_move_pct: Number(pnlGateResult.underlyingAdverseMovePct.toFixed(6)),
+                protective_sl_authoritatively_confirmed: protectiveSlAuthoritativelyConfirmed,
+                original_exit_action: originalExitAction,
+                original_exit_reason: originalExitReason,
+                downgraded_by_phase2a: protectiveSlAuthoritativelyConfirmed,
+                final_exit_action: action,
+                final_exit_reason: reason,
+                reduce_ratio: reduceRatio,
+                repeat_reduce_suppressed: protectiveSlAuthoritativelyConfirmed && priorShockDefensiveReduce
+            }));
         }
     } else if (hasAdverseDirectionalAuthority) {
         if (!adverseMoveLargeEnoughForDefensiveAction) {
