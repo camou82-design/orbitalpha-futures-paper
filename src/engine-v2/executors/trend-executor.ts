@@ -166,6 +166,8 @@ export function executeTrendRegime(input: EngineV2Input, judgment: MarketJudgmen
     const stopPrice = trendStops?.stopPrice ?? null;
     const invalidationPx = trendStops?.invalidationPx ?? null;
 
+    const isTrendCandidate = (signal === "LONG_CANDIDATE" || signal === "SHORT_CANDIDATE") && (side === "long" || side === "short");
+
     return {
         signal,
         side,
@@ -179,7 +181,11 @@ export function executeTrendRegime(input: EngineV2Input, judgment: MarketJudgmen
             emaGap,
             trendWeakness,
             stopPrice,
-            invalidationPx
+            invalidationPx,
+            ...(isTrendCandidate ? {
+                trend_continuation: true,
+                trend_provenance: "TREND_EXECUTOR_MOMENTUM"
+            } : {})
         }
     };
 }
