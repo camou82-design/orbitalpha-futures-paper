@@ -2095,6 +2095,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const alignedSignal =
         trendSideCandidate === "short" ? "paper_short_candidate" :
             trendSideCandidate === "long" ? "paper_long_candidate" : "none";
+    const alignedSide: EngineV2Side =
+        alignedSignal === "paper_long_candidate" ? "long" :
+            alignedSignal === "paper_short_candidate" ? "short" : "none";
 
     const readinessDiag = (riskSizing.diagnostics ?? {}) as Record<string, unknown>;
     const isLiveExecution = v2State.okxLiveEnabled === true || readinessDiag.okx_live_enabled === true;
@@ -2178,6 +2181,38 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const isFtsActive = judgment.subtype === "FAST_TREND_SHIFT" || ftsDiag?.active === true;
     const ftsSubtype = isFtsActive ? "FAST_TREND_SHIFT" : judgment.subtype;
     const ftsDirection = ftsDiag?.direction ?? (execMeta as any)?.fast_trend_shift_direction ?? null;
+
+    const ftsLowerHigh = ftsDiag?.lower_high_detected === true || (execMeta as any)?.lower_high_detected === true || (judgment.diagnostics as any)?.fastTrendShift?.lower_high_detected === true || (input.snapshot as any)?.fastTrendShift?.lower_high_detected === true;
+    const ftsLowerLow = ftsDiag?.lower_low_detected === true || (execMeta as any)?.lower_low_detected === true || (judgment.diagnostics as any)?.fastTrendShift?.lower_low_detected === true || (input.snapshot as any)?.fastTrendShift?.lower_low_detected === true;
+    const ftsBoxMidLost = ftsDiag?.box_mid_lost === true || (execMeta as any)?.box_mid_lost === true || (judgment.diagnostics as any)?.fastTrendShift?.box_mid_lost === true || (input.snapshot as any)?.fastTrendShift?.box_mid_lost === true || (typeof ftsDiag?.reason === "string" && ftsDiag.reason.includes("box_mid_lost")) || (boxPos != null && boxPos < 0.5);
+
+    const isFtsShortStructurallyProven =
+        (isFtsActive || ftsSubtype === "FAST_TREND_SHIFT") &&
+        ftsDirection === "short" &&
+        ftsLowerHigh &&
+        ftsLowerLow &&
+        ftsBoxMidLost;
+
+    const ftsHigherHigh = ftsDiag?.higher_high_detected === true || (execMeta as any)?.higher_high_detected === true || (judgment.diagnostics as any)?.fastTrendShift?.higher_high_detected === true || (input.snapshot as any)?.fastTrendShift?.higher_high_detected === true;
+    const ftsHigherLow = ftsDiag?.higher_low_detected === true || (execMeta as any)?.higher_low_detected === true || (judgment.diagnostics as any)?.fastTrendShift?.higher_low_detected === true || (input.snapshot as any)?.fastTrendShift?.higher_low_detected === true;
+    const ftsBoxMidReclaimed = ftsDiag?.box_mid_reclaimed === true || (execMeta as any)?.box_mid_reclaimed === true || (judgment.diagnostics as any)?.fastTrendShift?.box_mid_reclaimed === true || (input.snapshot as any)?.fastTrendShift?.box_mid_reclaimed === true || (typeof ftsDiag?.reason === "string" && (ftsDiag.reason.includes("box_mid_ok") || ftsDiag.reason.includes("box_mid_reclaimed"))) || (boxPos != null && boxPos > 0.5);
+
+    const isFtsLongStructurallyProven =
+        (isFtsActive || ftsSubtype === "FAST_TREND_SHIFT") &&
+        ftsDirection === "long" &&
+        ftsHigherHigh &&
+        ftsHigherLow &&
+        ftsBoxMidReclaimed;
+
+    const fastTrendShiftConfirmed = isFtsShortStructurallyProven || isFtsLongStructurallyProven;
+    const fastTrendShiftSide: "long" | "short" | "none" =
+        isFtsShortStructurallyProven ? "short" : isFtsLongStructurallyProven ? "long" : "none";
+    const structuralConfirmationProven = fastTrendShiftConfirmed;
+    const shockConflictsWithAlignedSide =
+        (alignedSide === "long" && shock === "DOWN") ||
+        (alignedSide === "short" && shock === "UP");
+    let oppositeSideOverrideBlocked = false;
+    let oppositeSideOverrideBlockReason: string | null = null;
 
     const ethFtsLowerShortStaleEval = evaluateEthFtsLowerShortStaleRelease({
         symbol: String(input.symbol),
@@ -2624,7 +2659,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     setupType = "lower_breakdown_continuation_short";
                     setupSide = "short";
                     setupEvidence = { boxBreakSide, emaGap, trend_side_candidate: trendSideCandidate };
-                } else if (downLowerReversalConfirmedLong && false) { // ?섏젙: SHOCK_REACTION_DOWN?먯꽌 long 諛곗젣
+                } else if (downLowerReversalConfirmedLong) {
                     setupType = "lower_reversal_confirmed_long";
                     setupSide = "long";
                     countertrendUsed = true;
@@ -2845,10 +2880,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         if (shock === "DOWN" && v2DecisionAfterPromotion === "ENTER") {
             const downCounterTrendLongAllowed =
                 v2SideAfterPromotion === "long" &&
-                (zone === "lower" || rangeEdgeExtreme) &&
-                reversalConfirmed &&
-                shockRecoveryHint &&
-                false; // ?섏젙: DOWN shock?먯꽌??long 臾댁“嫄?李⑤떒
+                (isBtcRangeMrStaleDownShockBypass ||
+                    ((zone === "lower" || rangeEdgeExtreme) &&
+                    reversalConfirmed &&
+                    shockRecoveryHint));
             if (v2SideAfterPromotion !== "short" && !downCounterTrendLongAllowed) {
                 v2DecisionAfterPromotion = "HOLD";
                 v2SideAfterPromotion = "none";
@@ -2864,9 +2899,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         if (shock === "UP" && v2DecisionAfterPromotion === "ENTER") {
             const upCounterTrendShortAllowed =
                 v2SideAfterPromotion === "short" &&
-                (zone === "upper" || rangeEdgeExtreme) &&
-                reversalConfirmed &&
-                shockRecoveryHint;
+                (isBtcRangeMrStaleUpShockBypass ||
+                    ((zone === "upper" || rangeEdgeExtreme) &&
+                    reversalConfirmed &&
+                    shockRecoveryHint));
             if (v2SideAfterPromotion !== "long" && !upCounterTrendShortAllowed) {
                 v2DecisionAfterPromotion = "HOLD";
                 v2SideAfterPromotion = "none";
@@ -7190,6 +7226,31 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
     }
 
+    // Invariant: Shock-only opposite-side entry authority restriction
+    if (alignedSide === "long" && shock === "DOWN" && v2DecisionAfterPromotion === "ENTER" && v2SideAfterPromotion === "short") {
+        if (!isFtsShortStructurallyProven) {
+            v2DecisionAfterPromotion = "HOLD";
+            v2SideAfterPromotion = "none";
+            v2RejectReasonAfterPromotion = "SHOCK_ONLY_OPPOSITE_SIDE_ENTRY_FORBIDDEN";
+            promotionApplied = false;
+            promotionReason = null;
+            oppositeSideOverrideBlocked = true;
+            oppositeSideOverrideBlockReason = "SHOCK_ONLY_OPPOSITE_SIDE_ENTRY_FORBIDDEN";
+        }
+    }
+
+    if (alignedSide === "short" && shock === "UP" && v2DecisionAfterPromotion === "ENTER" && v2SideAfterPromotion === "long") {
+        if (!isFtsLongStructurallyProven) {
+            v2DecisionAfterPromotion = "HOLD";
+            v2SideAfterPromotion = "none";
+            v2RejectReasonAfterPromotion = "SHOCK_ONLY_OPPOSITE_SIDE_ENTRY_FORBIDDEN";
+            promotionApplied = false;
+            promotionReason = null;
+            oppositeSideOverrideBlocked = true;
+            oppositeSideOverrideBlockReason = "SHOCK_ONLY_OPPOSITE_SIDE_ENTRY_FORBIDDEN";
+        }
+    }
+
     finalDecision = v2DecisionAfterPromotion;
     blockReason = v2RejectReasonAfterPromotion;
 
@@ -9797,6 +9858,24 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }));
     }
 
+    console.info(JSON.stringify({
+        event: "V2_DIRECTIONAL_AUTHORITY_AUDIT_PROOF",
+        symbol: String(input.symbol),
+        aligned_signal: alignedSignal,
+        aligned_side: alignedSide,
+        trend_side_candidate_before: emaGap > 0 ? "long" : emaGap < 0 ? "short" : "none",
+        trend_side_candidate_after: trendSideCandidate,
+        trend_side_source: fastTrendShiftConfirmed && structuralConfirmationProven ? "fast_trend_shift_structural" : (emaGap !== 0 ? "ema_gap" : "none"),
+        directional_shock_state: shock,
+        shock_conflicts_with_aligned_side: shockConflictsWithAlignedSide,
+        fast_trend_shift_confirmed: fastTrendShiftConfirmed,
+        fast_trend_shift_side: fastTrendShiftSide,
+        structural_confirmation_proven: structuralConfirmationProven,
+        opposite_side_override_blocked: oppositeSideOverrideBlocked,
+        final_authority_decision: finalDecision,
+        final_authority_side: v2SideAfterPromotion,
+        block_reason: oppositeSideOverrideBlocked ? oppositeSideOverrideBlockReason : (blockReason ?? null)
+    }));
     console.info(JSON.stringify({
         event: "V2_TREND_AUTHORITY_DIAGNOSTIC_PROOF",
         symbol: String(input.symbol),

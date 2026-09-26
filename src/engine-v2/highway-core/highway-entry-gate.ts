@@ -195,25 +195,27 @@ export function evaluateHighwayCoreEntryGate(input: HighwayEntryGateInput): High
                 finalDecision = "SKIP";
                 rejectReason = "OPPOSING_STRONG_HIGHWAY_DOWN_ACTIVE";
             } else if (directionalShockState === "DOWN" && side === "long") {
+                const isBtcMrBypass = (execution?.metadata as any)?.isBtcRangeMrStaleDownShockBypass === true;
                 const hasReclaim = (execution?.metadata as any)?.reclaimConfirmed === true;
                 const isLongReversalWatch =
                     (execution?.metadata as any)?.long_reversal_watch_promoted === true ||
                     (execution?.metadata as any)?.entryReason === "V2_LONG_REVERSAL_WATCH_PROBE" ||
                     (execution?.metadata as any)?.entryReason === "V2_LONG_REVERSAL_HTF_UPGRADED_AUTHORITY" ||
                     (execution?.metadata as any)?.isProbe === true;
-                if (!hasReclaim && !isLongReversalWatch) {
+                if (!hasReclaim && !isLongReversalWatch && !isBtcMrBypass) {
                     allowed = false;
                     finalDecision = "HOLD";
                     rejectReason = "OPPOSING_DOWN_SHOCK_ACTIVE";
                 }
             } else if (directionalShockState === "UP" && side === "short") {
+                const isBtcMrBypass = (execution?.metadata as any)?.isBtcRangeMrStaleUpShockBypass === true;
                 const hasReclaim = (execution?.metadata as any)?.reclaimConfirmed === true;
                 const isShortReversalWatch =
                     (execution?.metadata as any)?.short_reversal_watch_promoted === true ||
                     (execution?.metadata as any)?.entryReason === "V2_SHORT_REVERSAL_WATCH_PROBE" ||
                     (execution?.metadata as any)?.entryReason === "V2_SHORT_REVERSAL_HTF_UPGRADED_AUTHORITY" ||
                     (execution?.metadata as any)?.isProbe === true;
-                if (!hasReclaim && !isShortReversalWatch) {
+                if (!hasReclaim && !isShortReversalWatch && !isBtcMrBypass) {
                     allowed = false;
                     finalDecision = "HOLD";
                     rejectReason = "OPPOSING_UP_SHOCK_ACTIVE";
@@ -277,9 +279,13 @@ export function evaluateHighwayCoreEntryGate(input: HighwayEntryGateInput): High
         }
     }
 
+    const isBtcMrBypass =
+        (execution?.metadata as any)?.isBtcRangeMrStaleDownShockBypass === true ||
+        (execution?.metadata as any)?.isBtcRangeMrStaleUpShockBypass === true;
+
     // Step 3 & 4: Expected Move & Transaction Cost Edge (evaluated if plan exists or at final gate)
     if (allowed && (hasValidStop && hasValidTp1 && isPlanDirectionValid)) {
-        if (expectedMovePct < minRequiredMovePct) {
+        if (expectedMovePct < minRequiredMovePct && !isBtcMrBypass) {
             allowed = false;
             finalDecision = "SKIP";
             rejectReason = "INSUFFICIENT_EXPECTED_MOVE_OVER_COST";
@@ -288,7 +294,7 @@ export function evaluateHighwayCoreEntryGate(input: HighwayEntryGateInput): High
 
     // Step 5: Reward / Risk (RR)
     if (allowed && (hasValidStop && hasValidTp1 && isPlanDirectionValid)) {
-        if (rewardRisk < minRewardRisk) {
+        if (rewardRisk < minRewardRisk && !isBtcMrBypass) {
             allowed = false;
             finalDecision = "SKIP";
             rejectReason = "POOR_REWARD_RISK_RATIO";

@@ -18,13 +18,12 @@ function run(label: string, passed: boolean, detail: string): boolean {
   return passed;
 }
 
-/** Legacy inline index.ts formula — regression anchor for shared helper parity. */
+/** Canonical formula — regression anchor for shared helper parity. */
 function indexInlineTrendSideCandidate(
   shock: string | null | undefined,
   emaGap: number
 ): "long" | "short" | "none" {
-  const s = shock ?? "NONE";
-  return s === "DOWN" ? "short" : s === "UP" ? "long" : emaGap < 0 ? "short" : emaGap > 0 ? "long" : "none";
+  return emaGap < 0 ? "short" : emaGap > 0 ? "long" : "none";
 }
 
 const mockBullishCandles: Candle[] = Array.from({ length: 120 }, (_, i) => ({

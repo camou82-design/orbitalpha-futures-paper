@@ -2,20 +2,18 @@ import type { EngineV2Side } from "./types";
 
 /**
  * Single source of truth for authoritative trendSideCandidate.
- * Used by engine-v2/index.ts and WHIPSAW aged-release predicate.
+ * Used by engine-v2/index.ts and market judgment predicates.
  *
- * Semantics (production index.ts):
- * - shock DOWN -> short
- * - shock UP -> long
- * - otherwise emaGap sign (including UNKNOWN/null/non-UP/DOWN shock)
+ * Principles:
+ * 1. Directional shock is NOT an independent side creator overriding EMA / structural trend.
+ * 2. Directional shock serves as confirmation / risk context, not direction creator.
+ * 3. Shock aligning with base direction reinforces it; shock opposing base direction
+ *    cannot create an opposite-side candidate without canonical structural FTS confirmation.
  */
 export function deriveTrendSideCandidate(
     directionalShockState: string | null | undefined,
     emaGap: number
 ): "long" | "short" | "none" {
-    const shock = directionalShockState ?? "NONE";
-    if (shock === "DOWN") return "short";
-    if (shock === "UP") return "long";
     if (emaGap < 0) return "short";
     if (emaGap > 0) return "long";
     return "none";

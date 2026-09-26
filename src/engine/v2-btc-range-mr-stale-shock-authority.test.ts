@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { runEngineV2 } from "../engine-v2/index";
+import { runEngineV2, marketJudgmentCacheBySymbol } from "../engine-v2/index";
 import { globalShockStates, clearGlobalShockStates } from "../engine-v2/state/derive";
 import { rangeContinuationStateMap } from "../engine-v2/executors/range-executor";
 import { EngineV2Input } from "../engine-v2/types";
@@ -151,11 +151,13 @@ describe("PHASE 10A — BTC RANGE MR STALE-SHOCK LOCAL AUTHORITY PATCH SUITE", (
     beforeEach(() => {
         clearGlobalShockStates();
         rangeContinuationStateMap.clear();
+        marketJudgmentCacheBySymbol.clear();
     });
 
     afterEach(() => {
         clearGlobalShockStates();
         rangeContinuationStateMap.clear();
+        marketJudgmentCacheBySymbol.clear();
     });
 
     // 1. stale DOWN + lower + confirmed reversal -> BTC LONG MR allowed

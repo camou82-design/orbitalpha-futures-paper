@@ -1650,7 +1650,9 @@ export function executeRangeRegime(input: EngineV2Input, judgment: MarketJudgmen
         rangeBoxMidAtEntry: boxMid,
         rangeBoxQuality: qualityScore,
         rangeBoxSlope: bhSlope, // Approximate
-        rangeBoxDistorted: isDistorted
+        rangeBoxDistorted: isDistorted,
+        isBtcRangeMrStaleDownShockBypass,
+        isBtcRangeMrStaleUpShockBypass
     };
 
     const finalSide = signal === "NONE" ? "none" as const : side;
