@@ -19,6 +19,9 @@ export type V2AddOnReason =
     | "TREND_PULLBACK_ADDON_ALLOWED"
     | "TREND_CONTINUATION_ADDON_ALLOWED"
     | "TREND_PYRAMID_PROFIT_FUNDED_ALLOWED"
+    | "HIGHWAY_PULLBACK_PYRAMID_ALLOWED"
+    | "HIGHWAY_MOMENTUM_CONTINUATION_PYRAMID_ALLOWED"
+    | "MOMENTUM_AUTHORITY_NOT_CONFIRMED"
     | "CONFIRMED_ADVERSE_ADDON_ALLOWED"
     | "QUALITY_TOO_LOW_FOR_ADDON"
     | "CURRENT_STAGE_LIMIT"
@@ -73,15 +76,33 @@ export type V2AddOnPolicyResult = Readonly<{
     thesisValid?: boolean;
     sameSideConfirmation?: boolean;
     priceDistancePassed?: boolean;
-    riskProjection?: {
-        projectedTotalNotionalUsdt: number;
-        projectedWeightedAvgEntry: number;
-        projectedStopPrice: number;
-        projectedLossAtStopUsdt: number;
-        riskBeforeAddonUsdt: number;
-        riskBudgetUsdt: number;
-        riskBudgetAllowedNotional: number;
-    };
+    riskProjection?: (
+        // Adverse Add-On 전용: stop 체결 시 예상 손실량 (loss-at-stop)
+        {
+            projectedTotalNotionalUsdt: number;
+            projectedWeightedAvgEntry: number;
+            projectedStopPrice: number;
+            projectedLossAtStopUsdt: number;
+            riskBeforeAddonUsdt: number;
+            riskBudgetUsdt: number;
+            riskBudgetAllowedNotional: number;
+        }
+        |
+        // Highway Pyramid 전용: stop 체결 시 보호되는 이익 (protected profit at stop)
+        {
+            projectedTotalNotionalUsdt: number;
+            projectedWeightedAvgEntry: number;
+            projectedStopPrice: number;
+            /** stop 체결 시 보호되는 gross 이익 (수수료 차감 전). adverse-addon의 projectedLossAtStopUsdt와 semantic이 다름. */
+            projectedGrossProtectedProfitAtStopUsdt: number;
+            /** stop 체결 시 보호되는 net 이익 (friction 차감 후, +40 USDT gate 기준). */
+            projectedNetProtectedProfitAtStopUsdt: number;
+            riskBeforeAddonUsdt: number;
+            /** Highway pyramid: net protected profit at stop (legacy 필드명 유지, loss-at-stop 아님). */
+            riskBudgetUsdt: number;
+            riskBudgetAllowedNotional: number;
+        }
+    );
     evidence: string;
 }>;
 

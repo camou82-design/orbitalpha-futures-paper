@@ -124,9 +124,9 @@ function run(): void {
             entryProbeSizingSource: "V2_POST_SHOCK_COUNTER_PROBE"
         });
         assert.equal(sizing.probeMultiplierApplied, 0.25);
-        assert.equal(sizing.cappedFullEntryNotionalUsdt, 500);
-        assert.equal(sizing.canonicalIntendedNotionalUsdt, 125);
-        assert.equal(sizing.finalOrderNotionalUsdt, 125);
+        assert.equal(sizing.cappedFullEntryNotionalUsdt, 600);
+        assert.equal(sizing.canonicalIntendedNotionalUsdt, 150);
+        assert.equal(sizing.finalOrderNotionalUsdt, 150);
         const submit = resolveLiveSubmitStaticSafetyCap({
             authoritySource: "v2",
             okxLiveStaticNotionalCapEnabled: true,
@@ -135,8 +135,8 @@ function run(): void {
             emergencyUltimateCapUsdt: null
         });
         assert.equal(submit.skipStaticCapForV2Authority, true);
-        assert.equal(submit.finalSubmittedNotionalUsdt, 125);
-        console.log("[SIZING 500→0.25→125 SUBMIT] PASS");
+        assert.equal(submit.finalSubmittedNotionalUsdt, 150);
+        console.log("[SIZING 600→0.25→150 SUBMIT] PASS");
     }
 
     // Episode id deterministic from shock extremum ts

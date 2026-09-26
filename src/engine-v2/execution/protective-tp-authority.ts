@@ -25,6 +25,9 @@ export function resolveProtectiveTpPlan(input: Readonly<{
     isV2Authority: boolean;
     regime: MarketRegime;
     isV2RangePartialPlan: boolean;
+    isHighwayLineage?: boolean;
+    v2EntryReason?: string | null;
+    entrySemantic?: string | null;
     rawWantsTp?: boolean;
     takeProfitRequired?: boolean;
     targetPrice1?: number | null;
@@ -34,6 +37,16 @@ export function resolveProtectiveTpPlan(input: Readonly<{
     tp1Filled?: boolean;
     partialExitStage?: number | null;
 }>): ProtectiveTpPlanResolution {
+    const isHighway =
+        input.isHighwayLineage === true ||
+        input.entrySemantic === "HIGHWAY" ||
+        input.entrySemantic === "HIGHWAY_CORE" ||
+        (typeof input.v2EntryReason === "string" && (
+            input.v2EntryReason === "HIGHWAY_CORE_ENTRY" ||
+            input.v2EntryReason === "HIGHWAY_CORE_TREND_PROBE" ||
+            input.v2EntryReason.toUpperCase().startsWith("HIGHWAY_")
+        ));
+
     const tp1Candidate =
         input.takeProfit1Px ??
         input.targetPrice1 ??
@@ -85,6 +98,17 @@ export function resolveProtectiveTpPlan(input: Readonly<{
     }
 
     if (input.isV2Authority && input.regime === "TREND") {
+        if (isHighway) {
+            return {
+                mode: "NONE",
+                phase: "NONE",
+                exchangeTpRequired: false,
+                exchangeTpPrice: null,
+                exchangeTpSource: "none",
+                fullPositionTpRequired: false,
+                reason: "HIGHWAY_LIFECYCLE_PROTECTIVE_TP_DEFERRED"
+            };
+        }
         if (validTp1 != null) {
             return {
                 mode: "TREND_FULL_TP",
@@ -167,6 +191,9 @@ export function shouldAttachFullPositionProtectiveTp(input: Readonly<{
     isV2Authority: boolean;
     regime: MarketRegime;
     isV2RangePartialPlan: boolean;
+    isHighwayLineage?: boolean;
+    v2EntryReason?: string | null;
+    entrySemantic?: string | null;
     rawWantsTp: boolean;
     takeProfitRequired?: boolean;
     takeProfit2Px?: number | null;
@@ -176,6 +203,9 @@ export function shouldAttachFullPositionProtectiveTp(input: Readonly<{
         isV2Authority: input.isV2Authority,
         regime: input.regime,
         isV2RangePartialPlan: input.isV2RangePartialPlan,
+        isHighwayLineage: input.isHighwayLineage,
+        v2EntryReason: input.v2EntryReason,
+        entrySemantic: input.entrySemantic,
         rawWantsTp: input.rawWantsTp,
         takeProfitRequired: input.takeProfitRequired,
         takeProfit2Px: input.takeProfit2Px,

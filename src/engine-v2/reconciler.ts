@@ -259,6 +259,11 @@ export function deriveExecutionAuthority(
             useV2 && typeof selector.v2_result.metadata?.entrySemantic === "string"
                 ? selector.v2_result.metadata.entrySemantic
                 : undefined,
+        isHighwayLineage:
+            useV2 &&
+            (Boolean(selector.v2_result.metadata?.isHighwayLineage) ||
+                selector.v2_result.metadata?.entrySemantic === "HIGHWAY" ||
+                selector.v2_result.metadata?.entrySemantic === "HIGHWAY_CORE"),
         postShockProbeEpisodeId:
             useV2 && typeof selector.v2_result.metadata?.postShockProbeEpisodeId === "string"
                 ? selector.v2_result.metadata.postShockProbeEpisodeId

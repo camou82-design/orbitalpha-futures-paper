@@ -11719,6 +11719,7 @@ export function adaptV2Input(
                     managementAvgPx: p.managementAvgPx,
                     lifecycleState: p.lifecycleState,
                     manualAugmentActive: p.manualAugmentActive,
+                    isHighwayLineage: (p as any).isHighwayLineage === true || p.entrySemantic === "HIGHWAY" || p.entrySemantic === "HIGHWAY_CORE",
                     entrySemantic: p.entrySemantic,
                     postShockProbeEpisodeId: p.postShockProbeEpisodeId,
                     postShockProbePromotionState: p.postShockProbePromotionState

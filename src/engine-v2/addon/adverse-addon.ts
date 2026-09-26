@@ -19,6 +19,73 @@ export function hasHtfHardPolarityMismatch(side: "long" | "short", judgment: Eva
     return false;
 }
 
+export type DirectionalThesisState =
+    | "THESIS_VALID"
+    | "DIRECTION_UNCERTAIN"
+    | "THESIS_INVALID_OPPOSING_EMERGING";
+
+export function evaluateDirectionalThesisForAdverseAddon(input: Readonly<{
+    side: "long" | "short";
+    judgment: EvaluateV2AddOnPolicyArgs["judgment"];
+    execution: EvaluateV2AddOnPolicyArgs["execution"];
+    snapshot: EvaluateV2AddOnPolicyArgs["snapshot"];
+    qualityScore: number;
+    currentPrice: number;
+    invalidationPx: number | null;
+    stopPrice: number | null;
+    directionalShockState?: string;
+    crashState?: string;
+    pumpState?: string;
+}>): { state: DirectionalThesisState; reason: string } {
+    const { side, judgment, execution, snapshot, qualityScore, currentPrice, invalidationPx, stopPrice } = input;
+
+    // 1. Hard Opposing / Invalidation Signals (THESIS_INVALID_OPPOSING_EMERGING)
+    const htfHardMismatch = hasHtfHardPolarityMismatch(side, judgment);
+    const reversalAgainst =
+        (side === "long" && judgment.trendPhase === "DOWN") ||
+        (side === "short" && judgment.trendPhase === "UP");
+    const meta = (execution.metadata ?? {}) as Record<string, unknown>;
+    const metaReversal = meta.reversal_confirmed_against_position === true;
+    const invReached = isInvalidationReached(side, currentPrice, invalidationPx, stopPrice);
+
+    // Stabilized opposing shock: requires BOTH directionalShockState and shockPhase matching or lock, NOT a raw 1-tick spike
+    const stabilizedOpposingShock =
+        (side === "long" && (
+            (input.directionalShockState === "DOWN" && judgment.shockPhase === "DOWN_SHOCK") ||
+            (typeof input.crashState === "string" && input.crashState.includes("CRASH_LOCK"))
+        )) ||
+        (side === "short" && (
+            (input.directionalShockState === "UP" && judgment.shockPhase === "UP_SHOCK") ||
+            (typeof input.pumpState === "string" && input.pumpState.includes("PUMP_LOCK"))
+        ));
+
+    if (htfHardMismatch) return { state: "THESIS_INVALID_OPPOSING_EMERGING", reason: "HTF_POLARITY_MISMATCH" };
+    if (invReached) return { state: "THESIS_INVALID_OPPOSING_EMERGING", reason: "INVALIDATION_REACHED" };
+    if (reversalAgainst || metaReversal) return { state: "THESIS_INVALID_OPPOSING_EMERGING", reason: "REVERSAL_CONFIRMED_AGAINST_POSITION" };
+    if (stabilizedOpposingShock) return { state: "THESIS_INVALID_OPPOSING_EMERGING", reason: "STABILIZED_OPPOSING_SHOCK" };
+
+    // 2. Direction Uncertain (requires compounded weak evidence >= 2, or explicit ambiguous/whipsaw subtype)
+    const isWhipsawRecheck = judgment.subtype === "WHIPSAW_SHOCK_RECHECK";
+    let weakEvidenceCount = 0;
+    if (qualityScore < 70) weakEvidenceCount += 1;
+    if (judgment.trendPhase === "EXHAUSTION") weakEvidenceCount += 1;
+    if (judgment.regime_final === "TRANSITION" || (judgment.transitionPhase != null && judgment.transitionPhase !== "NONE")) weakEvidenceCount += 1;
+    const trendWeakness = typeof (snapshot as any)?.trendWeaknessScore === "number"
+        ? (snapshot as any).trendWeaknessScore
+        : (typeof (judgment as any)?.trendWeaknessScore === "number" ? (judgment as any).trendWeaknessScore : 0);
+    if (trendWeakness > 0.75) weakEvidenceCount += 1;
+
+    if (isWhipsawRecheck || weakEvidenceCount >= 2) {
+        return {
+            state: "DIRECTION_UNCERTAIN",
+            reason: isWhipsawRecheck ? "WHIPSAW_SHOCK_RECHECK" : `COMPOUNDED_WEAKNESS_EVIDENCE_${weakEvidenceCount}`
+        };
+    }
+
+    // 3. Thesis is Valid
+    return { state: "THESIS_VALID", reason: "THESIS_VALID_SAME_SIDE_CONFIRMED" };
+}
+
 export function isThesisValidForAdverseAddon(
     side: "long" | "short",
     judgment: EvaluateV2AddOnPolicyArgs["judgment"],
@@ -200,6 +267,10 @@ export function evaluateConfirmedAdverseAddOn(
 
     const sameSidePositionForLimit = side === "long" ? v2State.longPosition : v2State.shortPosition;
     const adverseAddonCount = Math.max(0, Number(sameSidePositionForLimit?.adverseAddonCount ?? 0));
+    const addonCount = Math.max(0, Number(sameSidePositionForLimit?.addonCount ?? 0));
+    if (addonCount > adverseAddonCount) {
+        return adverseWatch(base, "SAME_SIDE_POSITION_WATCH_RECHECK", "ADVERSE_ADD_FORBIDDEN_AFTER_PYRAMID");
+    }
     if (adverseAddonCount >= MAX_ADVERSE_ADDON_COUNT) {
         return adverseWatch(base, "SAME_SIDE_POSITION_WATCH_RECHECK", "ADVERSE_ADDON_LIMIT_REACHED");
     }
@@ -222,22 +293,29 @@ export function evaluateConfirmedAdverseAddOn(
         });
     }
 
-    if (!isThesisValidForAdverseAddon(side, judgment, execution)) {
-        return adverseWatch(base, "SIDE_MISMATCH_FORBIDDEN", "THESIS_INVALIDATED");
-    }
-
-    if (hasHtfHardPolarityMismatch(side, judgment)) {
-        return adverseWatch(base, "SIDE_MISMATCH_FORBIDDEN", "HTF_POLARITY_MISMATCH");
-    }
-
     const currentPrice = Number(snapshot.lastPrice ?? 0);
     const invalidationPx = execution.invalidationPx ?? args.currentStopPrice ?? null;
-    if (isInvalidationReached(side, currentPrice, invalidationPx, execution.stopPrice ?? args.currentStopPrice)) {
-        return adverseWatch(base, "SIDE_MISMATCH_FORBIDDEN", "INVALIDATION_REACHED");
-    }
+    const stopPrice = execution.stopPrice ?? args.currentStopPrice ?? null;
 
-    if (base.qualityScore < 70) {
-        return adverseWatch(base, "QUALITY_TOO_LOW_FOR_ADDON", "QUALITY_NOT_MET");
+    const thesisEval = evaluateDirectionalThesisForAdverseAddon({
+        side,
+        judgment,
+        execution,
+        snapshot,
+        qualityScore: base.qualityScore,
+        currentPrice,
+        invalidationPx,
+        stopPrice,
+        directionalShockState: v2State.directionalShockState,
+        crashState: v2State.crashState,
+        pumpState: v2State.pumpState
+    });
+
+    if (thesisEval.state === "THESIS_INVALID_OPPOSING_EMERGING") {
+        return adverseWatch(base, "SIDE_MISMATCH_FORBIDDEN", thesisEval.reason);
+    }
+    if (thesisEval.state === "DIRECTION_UNCERTAIN") {
+        return adverseWatch(base, "SAME_SIDE_POSITION_WATCH_RECHECK", thesisEval.reason);
     }
 
     const priceDistancePassed = isPriceDistancePassedForAdverseAddon(

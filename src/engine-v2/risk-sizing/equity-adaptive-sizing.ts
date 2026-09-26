@@ -27,6 +27,7 @@ export const MAX_ADVERSE_ADDON_EQUITY_MULTIPLE = 0.25;
 export const MARGIN_RESERVE_RATIO_DEFAULT = 0.2;
 export const RISK_BUDGET_TOLERANCE_MULTIPLIER = 1.2;
 export const ROUND_TRIP_FEE_RATE_DEFAULT = 0.001;
+export const DEFAULT_V2_HARD_SAFETY_CAP_USDT = 600;
 
 export type EquitySizingOrderKind = "ENTRY" | "PYRAMIDING_ADDON" | "ADVERSE_ADDON";
 
@@ -76,6 +77,8 @@ export type EvaluateEquityAdaptiveSizingInput = Readonly<{
      * Normal V2 risk-authoritative entries must leave this false.
      */
     emergencyFailsafeActive?: boolean;
+    /** Explicit flag indicating this is Highway Core lifecycle lineage. */
+    isHighwayLineage?: boolean;
     /**
      * ENTRY probe size multiplier. Applied after equity/symbol/account/emergency caps,
      * before HTF multiplier and OKX lot normalization.
@@ -237,7 +240,7 @@ export function resolveUltimateSafetyCapForOrderSizing(input: Readonly<{
 }>): LiveOrderNotionalCapResolution & { v2HardSafetyCapUsdt: number | null } {
     const emergencyCapUsdt = positiveCapUsdt(input.emergencyCapUsdt);
     const legacyStaticCapUsdt = positiveCapUsdt(input.legacyStaticCapUsdt);
-    const v2HardSafetyCapUsdt = positiveCapUsdt(input.v2HardSafetyCapUsdt);
+    const v2HardSafetyCapUsdt = positiveCapUsdt(input.v2HardSafetyCapUsdt) ?? (input.v2AuthorityEntry === true ? DEFAULT_V2_HARD_SAFETY_CAP_USDT : null);
     const activeEmergencyCap = input.emergencyFailsafeActive === true ? emergencyCapUsdt : null;
 
     let effectiveLiveCapUsdt: number | null = null;
@@ -564,12 +567,18 @@ export function evaluateEquityAdaptiveSizing(
     const remainingSymbolCapacity = Math.max(0, symbolCapUsdt - input.existingSymbolNotionalUsdt);
     const remainingAccountCapacity = Math.max(0, accountCapUsdt - input.existingAccountNotionalUsdt);
 
+    const isHighway = input.isHighwayLineage === true;
+    const highwayInitialTargetUsdt = equity * 0.25;
+    const highwayDefensiveTargetUsdt = equity * 0.75 * 0.30; // equity * 22.5%
+    const highwayPyramidTargetUsdt = equity * 0.25;
+
     let preLotNotionalUsdt: number;
     let limitingAuthority = "unknown";
     if (input.orderKind === "ENTRY") {
         const policyRequested =
             input.policyRequestedNotionalUsdt ?? Number.POSITIVE_INFINITY;
         const entryCandidates = [
+            ...(isHighway ? [{ key: "highway_initial_target", value: highwayInitialTargetUsdt }] : []),
             { key: "risk_based_notional", value: riskBasedNotionalUsdt },
             { key: "account_open_risk_cap", value: accountOpenRiskNetNotionalUsdt },
             { key: "equity_initial_cap", value: equityInitialCapUsdt },
@@ -588,7 +597,7 @@ export function evaluateEquityAdaptiveSizing(
     } else if (input.orderKind === "ADVERSE_ADDON") {
         const policyRequested = Math.max(0, input.policyRequestedNotionalUsdt ?? 0);
         const addonCandidates = [
-            { key: "policy_requested", value: policyRequested },
+            ...(isHighway ? [{ key: "highway_defensive_target", value: highwayDefensiveTargetUsdt }] : []),
             { key: "max_adverse_addon", value: maxAdverseAddonUsdt },
             { key: "account_open_risk_cap", value: accountOpenRiskNetNotionalUsdt },
             { key: "symbol_capacity", value: remainingSymbolCapacity },
@@ -597,6 +606,9 @@ export function evaluateEquityAdaptiveSizing(
                 key: "adverse_risk_budget",
                 value: input.adverseRiskBudgetAllowedNotional ?? Number.POSITIVE_INFINITY
             },
+            ...(policyRequested > 0
+                ? [{ key: "policy_requested", value: policyRequested }]
+                : []),
             ...(ultimateSafetyCapUsdt != null
                 ? [{ key: input.v2AuthorityEntry ? "v2_hard_safety_cap" : "legacy_static_cap", value: ultimateSafetyCapUsdt }]
                 : [])
@@ -606,10 +618,13 @@ export function evaluateEquityAdaptiveSizing(
     } else {
         const policyRequested = Math.max(0, input.policyRequestedNotionalUsdt ?? 0);
         const pyramidCandidates = [
-            { key: "policy_requested", value: policyRequested },
+            ...(isHighway ? [{ key: "highway_pyramid_target", value: highwayPyramidTargetUsdt }] : []),
             { key: "account_open_risk_cap", value: accountOpenRiskNetNotionalUsdt },
             { key: "symbol_capacity", value: remainingSymbolCapacity },
             { key: "account_capacity", value: remainingAccountCapacity },
+            ...(policyRequested > 0
+                ? [{ key: "policy_requested", value: policyRequested }]
+                : []),
             ...(ultimateSafetyCapUsdt != null
                 ? [{ key: input.v2AuthorityEntry ? "v2_hard_safety_cap" : "legacy_static_cap", value: ultimateSafetyCapUsdt }]
                 : [])

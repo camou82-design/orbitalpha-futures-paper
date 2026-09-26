@@ -20,6 +20,8 @@ export type V2AddonEligibilityProofPayload = Readonly<{
     projected_weighted_avg_entry: number;
     stop_price: number;
     risk_before_addon_usdt: number;
+    projected_gross_protected_profit_at_stop_usdt?: number | null;
+    projected_net_protected_profit_at_stop_usdt?: number | null;
     risk_after_addon_usdt: number;
     risk_budget_usdt: number;
     add_on_allowed: boolean;
@@ -179,7 +181,20 @@ export function buildV2AddonEligibilityProof(input: Readonly<{
         projected_weighted_avg_entry: risk?.projectedWeightedAvgEntry ?? input.entryPrice,
         stop_price: risk?.projectedStopPrice ?? 0,
         risk_before_addon_usdt: risk?.riskBeforeAddonUsdt ?? 0,
-        risk_after_addon_usdt: risk?.projectedLossAtStopUsdt ?? 0,
+        projected_gross_protected_profit_at_stop_usdt:
+            risk != null && "projectedGrossProtectedProfitAtStopUsdt" in risk
+                ? risk.projectedGrossProtectedProfitAtStopUsdt
+                : null,
+        projected_net_protected_profit_at_stop_usdt:
+            risk != null && "projectedNetProtectedProfitAtStopUsdt" in risk
+                ? risk.projectedNetProtectedProfitAtStopUsdt
+                : null,
+        risk_after_addon_usdt:
+            risk != null && "projectedLossAtStopUsdt" in risk
+                ? risk.projectedLossAtStopUsdt
+                : risk != null && "projectedNetProtectedProfitAtStopUsdt" in risk
+                  ? risk.projectedNetProtectedProfitAtStopUsdt
+                  : 0,
         risk_budget_usdt: risk?.riskBudgetUsdt ?? input.addOnPolicy.availableRiskBudgetUsdt ?? 0,
         add_on_allowed: addOnAllowed,
         block_reason: blockReason

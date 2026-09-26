@@ -12267,6 +12267,9 @@ export class PaperEngine {
       isV2Authority: open.isV2Authority === true,
       regime,
       isV2RangePartialPlan,
+      isHighwayLineage: (open as any).isHighwayLineage === true || open.entrySemantic === "HIGHWAY",
+      v2EntryReason: (open as any).v2EntryReason,
+      entrySemantic: open.entrySemantic,
       rawWantsTp: true,
       takeProfitRequired: Boolean((open as any).takeProfitRequired),
       targetPrice1: open.targetPrice1,
@@ -13817,7 +13820,7 @@ export class PaperEngine {
         authoritySource: input.authoritySource,
         okxLiveStaticNotionalCapEnabled: this.config.okxLiveStaticNotionalCapEnabled,
         staticSafetyCapUsdt: liveCapResolution.effectiveLiveCapUsdt,
-        v2HardSafetyCapUsdt: this.config.okxLiveV2MaxOrderNotionalUsdt ?? 500,
+        v2HardSafetyCapUsdt: this.config.okxLiveV2MaxOrderNotionalUsdt ?? 600,
         intendedNotionalUsdt: final_submitted_notional_usdt,
         emergencyUltimateCapUsdt: liveCapResolution.emergencyCapUsdt,
         emergencyFailsafeActive: input.emergencyFailsafeActive === true
@@ -26872,7 +26875,7 @@ export function resolveLiveSubmitStaticSafetyCap(input: Readonly<{
   let emergencyCapReason: string | null = null;
 
   if (isV2) {
-    const v2HardCap = input.v2HardSafetyCapUsdt != null && input.v2HardSafetyCapUsdt > 0 ? input.v2HardSafetyCapUsdt : 500;
+    const v2HardCap = input.v2HardSafetyCapUsdt != null && input.v2HardSafetyCapUsdt > 0 ? input.v2HardSafetyCapUsdt : 600;
     if (v2HardCap > 0 && finalSubmittedNotionalUsdt > v2HardCap) {
       finalSubmittedNotionalUsdt = v2HardCap;
       finalSizeSource = "v2_hard_safety_cap";

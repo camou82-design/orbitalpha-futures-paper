@@ -122,6 +122,7 @@ export interface EngineV2Position {
     addonCount?: number;
     /** V2 진입 사유 - probe TP/exit 단계에서 진입 유형 판별에 사용. */
     v2EntryReason?: string;
+    isHighwayLineage?: boolean;
     entrySemantic?: string;
     postShockProbeEpisodeId?: string;
     postShockProbePromotionState?: "PROBE_ONLY" | "STANDARD_PROMOTED";
@@ -1406,6 +1407,7 @@ export type EntryExecutionAuthority = Readonly<{
     /** Last closed candle ts used by structural/closed-candle gates. */
     closedCandleTs?: number | null;
     entrySemantic?: string;
+    isHighwayLineage?: boolean;
     postShockProbeEpisodeId?: string;
     postShockProbePromotionState?: "PROBE_ONLY" | "STANDARD_PROMOTED";
 }>;
