@@ -181,7 +181,7 @@ export function isShockOrFtsPromotedTpEscalationContext(input: Readonly<{
     if (subtype === "WHIPSAW_SOFT_WATCH") return true;
     if (subtype.startsWith("SHOCK_REACTION")) return true;
     const promotion = String(input.promotionReason ?? "");
-    return promotion.includes("SHOCK_REACTION");
+    return promotion.includes("SHOCK_REACTION") || promotion.includes("V2_CONFLICT_RESOLVED_TREND") || promotion.includes("V2_CONFLICT_RESOLVED");
 }
 
 export type PromotedRangeTp1Candidate = Readonly<{

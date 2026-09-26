@@ -293,7 +293,9 @@ export function evaluateEthRangeEntryFeasibilityGate(
         subtypeStr.startsWith("SHOCK_REACTION") ||
         subtypeStr.includes("FAST_TREND_SHIFT") ||
         String(input.promotionReason ?? "").includes("breakout_continuation") ||
-        String(input.promotionReason ?? "").includes("breakdown_continuation")
+        String(input.promotionReason ?? "").includes("breakdown_continuation") ||
+        String(input.promotionReason ?? "").includes("V2_CONFLICT_RESOLVED_TREND") ||
+        String(input.promotionReason ?? "").includes("V2_CONFLICT_RESOLVED")
     ) {
         return makeBypassResult();
     }

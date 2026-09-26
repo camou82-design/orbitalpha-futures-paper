@@ -6,6 +6,10 @@ export type RangeBoundaryContinuationEval = Readonly<{
     wickOnlyBreak: boolean;
     closedBreakConfirmed: boolean;
     retestConfirmed: boolean;
+    continuationLineage?: boolean;
+    continuationConfirmationPassed?: boolean;
+    breakoutBreakdownSubstituted?: boolean;
+    continuationScore?: number;
     evidence: Record<string, unknown>;
 }>;
 
@@ -15,6 +19,26 @@ export type RangeBoundaryContinuationContext = Readonly<{
     boxBreakSide: string;
     boxLow: number;
     boxHigh: number;
+    boxPos?: number | null;
+    atr?: number | null;
+    qualityScore?: number;
+    candles?: ReadonlyArray<{ open: number; high: number; low: number; close: number; volume?: number }>;
+    fastTrendShift?: Readonly<{
+        active?: boolean;
+        direction?: string;
+        lower_high_detected?: boolean;
+        lower_low_detected?: boolean;
+        higher_high_detected?: boolean;
+        higher_low_detected?: boolean;
+        box_mid_lost?: boolean;
+        box_mid_reclaimed?: boolean;
+        box_lower_breakdown_hold?: boolean;
+        box_upper_breakout_hold?: boolean;
+        reason?: string;
+        stop_price?: number | null;
+    }> | null;
+    opposingStrongHighway?: boolean;
+    directionalShock?: string;
     closedClose: number | null;
     lastPrice: number;
     previousConfirmedBoxLow: number | null;
@@ -212,6 +236,170 @@ function applyExecutionGates(
     return null;
 }
 
+export function evaluateShortContinuationEvidence(ctx: RangeBoundaryContinuationContext): {
+    passed: boolean;
+    reason: string | null;
+    score: number;
+    evidence: Record<string, unknown>;
+} {
+    const subtypeStr = String(ctx.judgmentSubtype ?? "").toUpperCase();
+    const execReasonStr = String(ctx.execReason ?? "").toLowerCase();
+
+    const isFtsShort =
+        subtypeStr === "FAST_TREND_SHIFT" &&
+        (ctx.fastTrendShift?.direction === "short" || ctx.trendSideCandidate === "short");
+    const isContinuationLineage =
+        isFtsShort ||
+        subtypeStr === "EARLY_SHORT_PROBE" ||
+        subtypeStr.includes("BREAKDOWN") ||
+        subtypeStr.includes("CONTINUATION") ||
+        subtypeStr.includes("TREND") ||
+        execReasonStr.includes("trend") ||
+        execReasonStr.includes("continuation") ||
+        execReasonStr.includes("breakdown") ||
+        execReasonStr.includes("fast_shift") ||
+        ctx.continuationDirection === "down";
+
+    if (!isContinuationLineage) {
+        return { passed: false, reason: "NOT_CONTINUATION_LINEAGE", score: 0, evidence: { isContinuationLineage: false } };
+    }
+
+    if (ctx.trendSideCandidate !== "short") {
+        return { passed: false, reason: "TREND_SIDE_NOT_SHORT", score: 0, evidence: { trendSideCandidate: ctx.trendSideCandidate } };
+    }
+
+    if (ctx.emaGap >= 0) {
+        return { passed: false, reason: "EMA_GAP_NOT_NEGATIVE", score: 20, evidence: { emaGap: ctx.emaGap } };
+    }
+
+    if (ctx.opposingStrongHighway === true) {
+        return { passed: false, reason: "OPPOSING_STRONG_HIGHWAY", score: 30, evidence: { opposingStrongHighway: true } };
+    }
+
+    if (ctx.directionalShock === "UP") {
+        return { passed: false, reason: "OPPOSING_SHOCK_UP", score: 30, evidence: { directionalShock: ctx.directionalShock } };
+    }
+
+    const quality = ctx.qualityScore ?? 70;
+    if (quality < 65) {
+        return { passed: false, reason: "QUALITY_BELOW_THRESHOLD", score: quality, evidence: { qualityScore: quality } };
+    }
+
+    if (!htfAllowsShort(ctx, true)) {
+        return { passed: false, reason: "HTF_POLICY_BLOCKS_SHORT", score: 50, evidence: { htfEntryPolicy: ctx.htfEntryPolicy } };
+    }
+
+    if (ctx.lateChaseBlocked) {
+        return { passed: false, reason: "LATE_CHASE_BLOCKED", score: 50, evidence: { lateChaseBlocked: true } };
+    }
+    if (typeof ctx.boxPos === "number" && ctx.boxPos < -0.25) {
+        return { passed: false, reason: "EXTREME_BOX_OVEREXTENSION_SHORT", score: 50, evidence: { boxPos: ctx.boxPos } };
+    }
+
+    if (ctx.candles && ctx.candles.length >= 2) {
+        const lastCandle = ctx.candles[ctx.candles.length - 1];
+        const prevCandle = ctx.candles[ctx.candles.length - 2];
+        const lastIsMassiveBull = lastCandle.close > lastCandle.open && (lastCandle.close - lastCandle.open) > (lastCandle.high - lastCandle.low) * 0.85;
+        if (lastIsMassiveBull && lastCandle.close > prevCandle.high) {
+            return { passed: false, reason: "ADVERSE_CANDLE_MOMENTUM_UP", score: 50, evidence: { lastCandle, prevCandle } };
+        }
+    }
+
+    return {
+        passed: true,
+        reason: null,
+        score: Math.min(100, quality + 10),
+        evidence: {
+            isContinuationLineage,
+            emaGap: ctx.emaGap,
+            qualityScore: quality,
+            htfEntryPolicy: ctx.htfEntryPolicy
+        }
+    };
+}
+
+export function evaluateLongContinuationEvidence(ctx: RangeBoundaryContinuationContext): {
+    passed: boolean;
+    reason: string | null;
+    score: number;
+    evidence: Record<string, unknown>;
+} {
+    const subtypeStr = String(ctx.judgmentSubtype ?? "").toUpperCase();
+    const execReasonStr = String(ctx.execReason ?? "").toLowerCase();
+
+    const isFtsLong =
+        subtypeStr === "FAST_TREND_SHIFT" &&
+        (ctx.fastTrendShift?.direction === "long" || ctx.trendSideCandidate === "long");
+    const isContinuationLineage =
+        isFtsLong ||
+        subtypeStr === "EARLY_LONG_PROBE" ||
+        subtypeStr.includes("BREAKOUT") ||
+        subtypeStr.includes("CONTINUATION") ||
+        subtypeStr.includes("TREND") ||
+        execReasonStr.includes("trend") ||
+        execReasonStr.includes("continuation") ||
+        execReasonStr.includes("breakout") ||
+        execReasonStr.includes("fast_shift") ||
+        ctx.continuationDirection === "up";
+
+    if (!isContinuationLineage) {
+        return { passed: false, reason: "NOT_CONTINUATION_LINEAGE", score: 0, evidence: { isContinuationLineage: false } };
+    }
+
+    if (ctx.trendSideCandidate !== "long") {
+        return { passed: false, reason: "TREND_SIDE_NOT_LONG", score: 0, evidence: { trendSideCandidate: ctx.trendSideCandidate } };
+    }
+
+    if (ctx.emaGap <= 0) {
+        return { passed: false, reason: "EMA_GAP_NOT_POSITIVE", score: 20, evidence: { emaGap: ctx.emaGap } };
+    }
+
+    if (ctx.opposingStrongHighway === true) {
+        return { passed: false, reason: "OPPOSING_STRONG_HIGHWAY", score: 30, evidence: { opposingStrongHighway: true } };
+    }
+
+    if (ctx.directionalShock === "DOWN") {
+        return { passed: false, reason: "OPPOSING_SHOCK_DOWN", score: 30, evidence: { directionalShock: ctx.directionalShock } };
+    }
+
+    const quality = ctx.qualityScore ?? 70;
+    if (quality < 65) {
+        return { passed: false, reason: "QUALITY_BELOW_THRESHOLD", score: quality, evidence: { qualityScore: quality } };
+    }
+
+    if (!htfAllowsLong(ctx, true)) {
+        return { passed: false, reason: "HTF_POLICY_BLOCKS_LONG", score: 50, evidence: { htfEntryPolicy: ctx.htfEntryPolicy } };
+    }
+
+    if (ctx.lateChaseBlocked) {
+        return { passed: false, reason: "LATE_CHASE_BLOCKED", score: 50, evidence: { lateChaseBlocked: true } };
+    }
+    if (typeof ctx.boxPos === "number" && ctx.boxPos > 1.25) {
+        return { passed: false, reason: "EXTREME_BOX_OVEREXTENSION_LONG", score: 50, evidence: { boxPos: ctx.boxPos } };
+    }
+
+    if (ctx.candles && ctx.candles.length >= 2) {
+        const lastCandle = ctx.candles[ctx.candles.length - 1];
+        const prevCandle = ctx.candles[ctx.candles.length - 2];
+        const lastIsMassiveBear = lastCandle.close < lastCandle.open && (lastCandle.open - lastCandle.close) > (lastCandle.high - lastCandle.low) * 0.85;
+        if (lastIsMassiveBear && lastCandle.close < prevCandle.low) {
+            return { passed: false, reason: "ADVERSE_CANDLE_MOMENTUM_DOWN", score: 50, evidence: { lastCandle, prevCandle } };
+        }
+    }
+
+    return {
+        passed: true,
+        reason: null,
+        score: Math.min(100, quality + 10),
+        evidence: {
+            isContinuationLineage,
+            emaGap: ctx.emaGap,
+            qualityScore: quality,
+            htfEntryPolicy: ctx.htfEntryPolicy
+        }
+    };
+}
+
 export function evaluateLowerBreakdownShortConfirmed(
     ctx: RangeBoundaryContinuationContext
 ): RangeBoundaryContinuationEval {
@@ -221,16 +409,20 @@ export function evaluateLowerBreakdownShortConfirmed(
         boundary,
         lastPrice: ctx.lastPrice
     });
-    const structureOk = shortBreakdownStructureConfirmed(ctx);
-    const retestOk = shortBreakdownRetestConfirmed(ctx);
+    const continuationEval = evaluateShortContinuationEvidence(ctx);
+    const breakoutBreakdownSubstituted = continuationEval.passed;
+    const structureOk = shortBreakdownStructureConfirmed(ctx) || breakoutBreakdownSubstituted;
+    const retestOk = shortBreakdownRetestConfirmed(ctx) || breakoutBreakdownSubstituted;
     const evidence: Record<string, unknown> = {
         breakdownBoundary: boundary,
         boxBreakSide: normalizeBreakSide(ctx.boxBreakSide),
-        closedBreakConfirmed: closedEval.confirmed,
-        wickOnlyBreak: closedEval.wickOnly,
+        closedBreakConfirmed: closedEval.confirmed || breakoutBreakdownSubstituted,
+        wickOnlyBreak: closedEval.wickOnly && !breakoutBreakdownSubstituted,
         retestConfirmed: retestOk,
         continuationDirection: ctx.continuationDirection,
-        continuationPhase: ctx.continuationPhase
+        continuationPhase: ctx.continuationPhase,
+        continuationEvidence: continuationEval.evidence,
+        breakoutBreakdownSubstituted
     };
 
     if (ctx.trendSideCandidate !== "short") {
@@ -240,6 +432,10 @@ export function evaluateLowerBreakdownShortConfirmed(
             wickOnlyBreak: closedEval.wickOnly,
             closedBreakConfirmed: closedEval.confirmed,
             retestConfirmed: retestOk,
+            continuationLineage: continuationEval.evidence.isContinuationLineage as boolean,
+            continuationConfirmationPassed: continuationEval.passed,
+            breakoutBreakdownSubstituted,
+            continuationScore: continuationEval.score,
             evidence
         };
     }
@@ -251,28 +447,40 @@ export function evaluateLowerBreakdownShortConfirmed(
             wickOnlyBreak: closedEval.wickOnly,
             closedBreakConfirmed: closedEval.confirmed,
             retestConfirmed: retestOk,
+            continuationLineage: continuationEval.evidence.isContinuationLineage as boolean,
+            continuationConfirmationPassed: continuationEval.passed,
+            breakoutBreakdownSubstituted,
+            continuationScore: continuationEval.score,
             evidence
         };
     }
 
-    if (closedEval.wickOnly) {
+    if (closedEval.wickOnly && !breakoutBreakdownSubstituted) {
         return {
             confirmed: false,
             holdReason: "WICK_ONLY_BREAKDOWN",
             wickOnlyBreak: true,
             closedBreakConfirmed: false,
             retestConfirmed: retestOk,
+            continuationLineage: continuationEval.evidence.isContinuationLineage as boolean,
+            continuationConfirmationPassed: continuationEval.passed,
+            breakoutBreakdownSubstituted,
+            continuationScore: continuationEval.score,
             evidence
         };
     }
 
-    if (!closedEval.confirmed && ctx.judgmentSubtype !== "BREAKDOWN_RETEST_FAILED") {
+    if (!closedEval.confirmed && ctx.judgmentSubtype !== "BREAKDOWN_RETEST_FAILED" && !breakoutBreakdownSubstituted) {
         return {
             confirmed: false,
             holdReason: "CLOSED_CANDLE_BREAKDOWN_NOT_CONFIRMED",
             wickOnlyBreak: false,
             closedBreakConfirmed: false,
             retestConfirmed: retestOk,
+            continuationLineage: continuationEval.evidence.isContinuationLineage as boolean,
+            continuationConfirmationPassed: continuationEval.passed,
+            breakoutBreakdownSubstituted,
+            continuationScore: continuationEval.score,
             evidence
         };
     }
@@ -284,6 +492,10 @@ export function evaluateLowerBreakdownShortConfirmed(
             wickOnlyBreak: false,
             closedBreakConfirmed: closedEval.confirmed,
             retestConfirmed: false,
+            continuationLineage: continuationEval.evidence.isContinuationLineage as boolean,
+            continuationConfirmationPassed: continuationEval.passed,
+            breakoutBreakdownSubstituted,
+            continuationScore: continuationEval.score,
             evidence
         };
     }
@@ -292,7 +504,8 @@ export function evaluateLowerBreakdownShortConfirmed(
         normalizeBreakSide(ctx.boxBreakSide) === "lower" ||
         closedEval.confirmed ||
         ctx.judgmentSubtype === "BREAKDOWN_RETEST_FAILED" ||
-        retestOk;
+        retestOk ||
+        breakoutBreakdownSubstituted;
 
     if (!htfAllowsShort(ctx, strongConfirmationOk)) {
         return {
@@ -301,17 +514,25 @@ export function evaluateLowerBreakdownShortConfirmed(
             wickOnlyBreak: false,
             closedBreakConfirmed: closedEval.confirmed,
             retestConfirmed: retestOk,
+            continuationLineage: continuationEval.evidence.isContinuationLineage as boolean,
+            continuationConfirmationPassed: continuationEval.passed,
+            breakoutBreakdownSubstituted,
+            continuationScore: continuationEval.score,
             evidence
         };
     }
 
-    if (ctx.lateChaseBlocked && ctx.judgmentSubtype !== "BREAKDOWN_RETEST_FAILED") {
+    if (ctx.lateChaseBlocked && ctx.judgmentSubtype !== "BREAKDOWN_RETEST_FAILED" && !breakoutBreakdownSubstituted) {
         return {
             confirmed: false,
             holdReason: "LATE_CHASE_BLOCKED",
             wickOnlyBreak: false,
             closedBreakConfirmed: closedEval.confirmed,
             retestConfirmed: retestOk,
+            continuationLineage: continuationEval.evidence.isContinuationLineage as boolean,
+            continuationConfirmationPassed: continuationEval.passed,
+            breakoutBreakdownSubstituted,
+            continuationScore: continuationEval.score,
             evidence
         };
     }
@@ -324,6 +545,10 @@ export function evaluateLowerBreakdownShortConfirmed(
             wickOnlyBreak: false,
             closedBreakConfirmed: closedEval.confirmed,
             retestConfirmed: retestOk,
+            continuationLineage: continuationEval.evidence.isContinuationLineage as boolean,
+            continuationConfirmationPassed: continuationEval.passed,
+            breakoutBreakdownSubstituted,
+            continuationScore: continuationEval.score,
             evidence
         };
     }
@@ -335,6 +560,10 @@ export function evaluateLowerBreakdownShortConfirmed(
             wickOnlyBreak: false,
             closedBreakConfirmed: closedEval.confirmed,
             retestConfirmed: retestOk,
+            continuationLineage: continuationEval.evidence.isContinuationLineage as boolean,
+            continuationConfirmationPassed: continuationEval.passed,
+            breakoutBreakdownSubstituted,
+            continuationScore: continuationEval.score,
             evidence
         };
     }
@@ -343,8 +572,12 @@ export function evaluateLowerBreakdownShortConfirmed(
         confirmed: true,
         holdReason: null,
         wickOnlyBreak: false,
-        closedBreakConfirmed: closedEval.confirmed,
+        closedBreakConfirmed: closedEval.confirmed || breakoutBreakdownSubstituted,
         retestConfirmed: retestOk,
+        continuationLineage: continuationEval.evidence.isContinuationLineage as boolean,
+        continuationConfirmationPassed: continuationEval.passed,
+        breakoutBreakdownSubstituted,
+        continuationScore: continuationEval.score,
         evidence
     };
 }
@@ -358,16 +591,20 @@ export function evaluateUpperBreakoutLongConfirmed(
         boundary,
         lastPrice: ctx.lastPrice
     });
-    const structureOk = longBreakoutStructureConfirmed(ctx);
-    const retestOk = longBreakoutRetestConfirmed(ctx);
+    const continuationEval = evaluateLongContinuationEvidence(ctx);
+    const breakoutBreakdownSubstituted = continuationEval.passed;
+    const structureOk = longBreakoutStructureConfirmed(ctx) || breakoutBreakdownSubstituted;
+    const retestOk = longBreakoutRetestConfirmed(ctx) || breakoutBreakdownSubstituted;
     const evidence: Record<string, unknown> = {
         breakoutBoundary: boundary,
         boxBreakSide: normalizeBreakSide(ctx.boxBreakSide),
-        closedBreakConfirmed: closedEval.confirmed,
-        wickOnlyBreak: closedEval.wickOnly,
+        closedBreakConfirmed: closedEval.confirmed || breakoutBreakdownSubstituted,
+        wickOnlyBreak: closedEval.wickOnly && !breakoutBreakdownSubstituted,
         retestConfirmed: retestOk,
         continuationDirection: ctx.continuationDirection,
-        continuationPhase: ctx.continuationPhase
+        continuationPhase: ctx.continuationPhase,
+        continuationEvidence: continuationEval.evidence,
+        breakoutBreakdownSubstituted
     };
 
     if (ctx.trendSideCandidate !== "long") {
@@ -377,6 +614,10 @@ export function evaluateUpperBreakoutLongConfirmed(
             wickOnlyBreak: closedEval.wickOnly,
             closedBreakConfirmed: closedEval.confirmed,
             retestConfirmed: retestOk,
+            continuationLineage: continuationEval.evidence.isContinuationLineage as boolean,
+            continuationConfirmationPassed: continuationEval.passed,
+            breakoutBreakdownSubstituted,
+            continuationScore: continuationEval.score,
             evidence
         };
     }
@@ -388,17 +629,25 @@ export function evaluateUpperBreakoutLongConfirmed(
             wickOnlyBreak: closedEval.wickOnly,
             closedBreakConfirmed: closedEval.confirmed,
             retestConfirmed: retestOk,
+            continuationLineage: continuationEval.evidence.isContinuationLineage as boolean,
+            continuationConfirmationPassed: continuationEval.passed,
+            breakoutBreakdownSubstituted,
+            continuationScore: continuationEval.score,
             evidence
         };
     }
 
-    if (closedEval.wickOnly) {
+    if (closedEval.wickOnly && !breakoutBreakdownSubstituted) {
         return {
             confirmed: false,
             holdReason: "WICK_ONLY_BREAKOUT",
             wickOnlyBreak: true,
             closedBreakConfirmed: false,
             retestConfirmed: retestOk,
+            continuationLineage: continuationEval.evidence.isContinuationLineage as boolean,
+            continuationConfirmationPassed: continuationEval.passed,
+            breakoutBreakdownSubstituted,
+            continuationScore: continuationEval.score,
             evidence
         };
     }
@@ -406,7 +655,8 @@ export function evaluateUpperBreakoutLongConfirmed(
     if (
         !closedEval.confirmed &&
         ctx.judgmentSubtype !== "BREAKOUT_RETEST_CONFIRMED" &&
-        ctx.judgmentSubtype !== "BREAKOUT_RETEST_CONFIRMED_VOLUME"
+        ctx.judgmentSubtype !== "BREAKOUT_RETEST_CONFIRMED_VOLUME" &&
+        !breakoutBreakdownSubstituted
     ) {
         return {
             confirmed: false,
@@ -414,6 +664,10 @@ export function evaluateUpperBreakoutLongConfirmed(
             wickOnlyBreak: false,
             closedBreakConfirmed: false,
             retestConfirmed: retestOk,
+            continuationLineage: continuationEval.evidence.isContinuationLineage as boolean,
+            continuationConfirmationPassed: continuationEval.passed,
+            breakoutBreakdownSubstituted,
+            continuationScore: continuationEval.score,
             evidence
         };
     }
@@ -425,6 +679,10 @@ export function evaluateUpperBreakoutLongConfirmed(
             wickOnlyBreak: false,
             closedBreakConfirmed: closedEval.confirmed,
             retestConfirmed: false,
+            continuationLineage: continuationEval.evidence.isContinuationLineage as boolean,
+            continuationConfirmationPassed: continuationEval.passed,
+            breakoutBreakdownSubstituted,
+            continuationScore: continuationEval.score,
             evidence
         };
     }
@@ -434,7 +692,8 @@ export function evaluateUpperBreakoutLongConfirmed(
         closedEval.confirmed ||
         ctx.judgmentSubtype === "BREAKOUT_RETEST_CONFIRMED" ||
         ctx.judgmentSubtype === "BREAKOUT_RETEST_CONFIRMED_VOLUME" ||
-        retestOk;
+        retestOk ||
+        breakoutBreakdownSubstituted;
 
     if (!htfAllowsLong(ctx, strongConfirmationOk)) {
         return {
@@ -443,17 +702,25 @@ export function evaluateUpperBreakoutLongConfirmed(
             wickOnlyBreak: false,
             closedBreakConfirmed: closedEval.confirmed,
             retestConfirmed: retestOk,
+            continuationLineage: continuationEval.evidence.isContinuationLineage as boolean,
+            continuationConfirmationPassed: continuationEval.passed,
+            breakoutBreakdownSubstituted,
+            continuationScore: continuationEval.score,
             evidence
         };
     }
 
-    if (ctx.lateChaseBlocked && !retestOk) {
+    if (ctx.lateChaseBlocked && !retestOk && !breakoutBreakdownSubstituted) {
         return {
             confirmed: false,
             holdReason: "LATE_CHASE_BLOCKED",
             wickOnlyBreak: false,
             closedBreakConfirmed: closedEval.confirmed,
             retestConfirmed: retestOk,
+            continuationLineage: continuationEval.evidence.isContinuationLineage as boolean,
+            continuationConfirmationPassed: continuationEval.passed,
+            breakoutBreakdownSubstituted,
+            continuationScore: continuationEval.score,
             evidence
         };
     }
@@ -466,6 +733,10 @@ export function evaluateUpperBreakoutLongConfirmed(
             wickOnlyBreak: false,
             closedBreakConfirmed: closedEval.confirmed,
             retestConfirmed: retestOk,
+            continuationLineage: continuationEval.evidence.isContinuationLineage as boolean,
+            continuationConfirmationPassed: continuationEval.passed,
+            breakoutBreakdownSubstituted,
+            continuationScore: continuationEval.score,
             evidence
         };
     }
@@ -477,6 +748,10 @@ export function evaluateUpperBreakoutLongConfirmed(
             wickOnlyBreak: false,
             closedBreakConfirmed: closedEval.confirmed,
             retestConfirmed: retestOk,
+            continuationLineage: continuationEval.evidence.isContinuationLineage as boolean,
+            continuationConfirmationPassed: continuationEval.passed,
+            breakoutBreakdownSubstituted,
+            continuationScore: continuationEval.score,
             evidence
         };
     }
@@ -485,8 +760,12 @@ export function evaluateUpperBreakoutLongConfirmed(
         confirmed: true,
         holdReason: null,
         wickOnlyBreak: false,
-        closedBreakConfirmed: closedEval.confirmed,
+        closedBreakConfirmed: closedEval.confirmed || breakoutBreakdownSubstituted,
         retestConfirmed: retestOk,
+        continuationLineage: continuationEval.evidence.isContinuationLineage as boolean,
+        continuationConfirmationPassed: continuationEval.passed,
+        breakoutBreakdownSubstituted,
+        continuationScore: continuationEval.score,
         evidence
     };
 }

@@ -64,6 +64,7 @@ import {
 import { resolveV2AuthoritativeCandleIdentity } from "./execution/authoritative-candle-identity";
 import { applyEthRangeMinimumStopDistance } from "./execution/eth-range-minimum-stop-authority";
 import { evaluateHighwayCoreEntryGate } from "./highway-core/highway-entry-gate";
+import { resolveHighwayDirectionalAuthority } from "./highway-core/highway-directional-authority";
 import { isSoftExitCooldownActive } from "./exit/soft-exit-hysteresis";
 import { evaluateShortReversalWatch } from "./market-judgment/short-reversal-watch";
 import { evaluateLongReversalWatch } from "./market-judgment/long-reversal-watch";
@@ -944,6 +945,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     let expectedNextAction: string | null = null;
     let execution: ExecutorOutput;
     let highwayGateRejected = false;
+    const highwayAuth = resolveHighwayDirectionalAuthority({
+        snapshot: authoritativeInput.snapshot ?? input.snapshot,
+        candles: input.candles ?? authoritativeInput.snapshot?.candles,
+        symbol: String(input.symbol)
+    });
     
     // CONTINUATION_MICRO_PROBE scope variables
     let microProbeFixedBoundary: number | null = null;
@@ -2937,6 +2943,13 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             boxBreakSide,
             boxLow: Number(authSnapForBoundary.boxLow ?? inputSnapForBoundary.boxLow ?? 0),
             boxHigh: Number(authSnapForBoundary.boxHigh ?? inputSnapForBoundary.boxHigh ?? 0),
+            boxPos: Number(boxPos ?? 0.5),
+            atr: Number(authSnapForBoundary.atr ?? inputSnapForBoundary.atr ?? 0),
+            qualityScore,
+            candles: input.candles ?? authoritativeInput.snapshot?.candles,
+            fastTrendShift: judgment.diagnostics?.fastTrendShift ?? null,
+            opposingStrongHighway: (trendSideCandidate === "short" ? highwayAuth.strongUp : highwayAuth.strongDown) ?? false,
+            directionalShock: shock,
             closedClose: boundaryClosedClose,
             lastPrice: Number(authSnapForBoundary.lastPrice ?? inputSnapForBoundary.lastPrice ?? 0),
             previousConfirmedBoxLow: continuationStateForBoundary?.previousConfirmedBoxLow ?? null,
@@ -4416,11 +4429,87 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             }
         }
 
+        const continuationStateForUpperConflict = rangeContinuationStateMap.get(String(input.symbol));
+        const execMetaForUpperConflict = execMeta as Record<string, unknown>;
+        const judgmentMetaForUpperConflict = (judgment.metadata ?? {}) as Record<string, unknown>;
+        const authSnapForUpperConflict = authoritativeInput.snapshot as unknown as Record<string, unknown>;
+        const inputSnapForUpperConflict = input.snapshot as unknown as Record<string, unknown>;
+        const conflictClosedCloseUpper =
+            typeof authSnapForUpperConflict.closedClose === "number"
+                ? authSnapForUpperConflict.closedClose
+                : (typeof inputSnapForUpperConflict.closedClose === "number"
+                    ? inputSnapForUpperConflict.closedClose
+                    : null);
+
+        const upperLongContinuationEval = evaluateUpperBreakoutLongConfirmed({
+            trendSideCandidate: "long",
+            zone,
+            boxBreakSide,
+            boxLow: Number(authSnapForUpperConflict.boxLow ?? inputSnapForUpperConflict.boxLow ?? 0),
+            boxHigh: Number(authSnapForUpperConflict.boxHigh ?? inputSnapForUpperConflict.boxHigh ?? 0),
+            boxPos: Number(boxPos ?? 0.5),
+            atr: Number(authSnapForUpperConflict.atr ?? inputSnapForUpperConflict.atr ?? 0),
+            qualityScore,
+            candles: input.candles ?? authoritativeInput.snapshot?.candles,
+            fastTrendShift: judgment.diagnostics?.fastTrendShift ?? null,
+            opposingStrongHighway: highwayAuth.strongDown,
+            directionalShock: shock,
+            closedClose: conflictClosedCloseUpper,
+            lastPrice: Number(authSnapForUpperConflict.lastPrice ?? inputSnapForUpperConflict.lastPrice ?? 0),
+            previousConfirmedBoxLow: continuationStateForUpperConflict?.previousConfirmedBoxLow ?? null,
+            previousConfirmedBoxHigh: continuationStateForUpperConflict?.previousConfirmedBoxHigh ?? null,
+            emaGap,
+            htfEntryPolicy: judgment.htf_entry_policy ?? "NEUTRAL_HTF_DATA_WAIT",
+            htfRequiresStrongerConfirmation: judgment.htf_requires_stronger_confirmation === true,
+            counterTrendRisk: judgment.counter_trend_risk === true,
+            riskLongAllow,
+            riskShortAllow,
+            allowNewLong,
+            allowNewShort,
+            whipsawShockRecheckActive,
+            hardBlockPresent,
+            paperExecutionReady,
+            signedExecutionReady,
+            hasSameSidePosition: v2State.currentPositions.some(p => p.symbol === input.symbol && String(p.side).toLowerCase() === "long"),
+            hasOppositeSidePosition: v2State.currentPositions.some(p => p.symbol === input.symbol && String(p.side).toLowerCase() === "short"),
+            judgmentSubtype: String(judgment.subtype ?? ""),
+            rangePhase: judgment.rangePhase ?? null,
+            transitionPhase: judgment.transitionPhase ?? null,
+            continuationDirection:
+                typeof execMetaForUpperConflict.continuationDirection === "string"
+                    ? String(execMetaForUpperConflict.continuationDirection)
+                    : continuationStateForUpperConflict?.direction ?? null,
+            continuationPhase:
+                typeof execMetaForUpperConflict.continuationPhase === "string"
+                    ? String(execMetaForUpperConflict.continuationPhase)
+                    : continuationStateForUpperConflict?.phase ?? null,
+            retestConfirmed:
+                execMetaForUpperConflict.retest_confirmed === true ||
+                judgmentMetaForUpperConflict.retestConfirmed === true ||
+                authSnapForUpperConflict.retestConfirmed === true ||
+                inputSnapForUpperConflict.retestConfirmed === true,
+            retestTouched:
+                execMetaForUpperConflict.retestTouched === true ||
+                judgmentMetaForUpperConflict.retestTouched === true ||
+                authSnapForUpperConflict.retestTouched === true ||
+                inputSnapForUpperConflict.retestTouched === true,
+            retestRejected:
+                execMetaForUpperConflict.retestRejected === true ||
+                judgmentMetaForUpperConflict.retestRejected === true ||
+                authSnapForUpperConflict.retestRejected === true ||
+                inputSnapForUpperConflict.retestRejected === true,
+            reversalConfirmed,
+            execReason: typeof execution.reason === "string" ? execution.reason : null,
+            lateChaseBlocked: execMetaForUpperConflict.late_chase_blocked === true,
+            retestRequired: execMetaForUpperConflict.retest_required === true
+        });
+
         // trend long
         if (!conflictResolvedUpperShort && trendSideCandidate === "long" && !(stairStepResult.detected && stairStepResult.direction === "UP")) {
             const upperBreakoutHold = judgment.metadata?.box_upper_breakout_hold === true || judgment.metadata?.upper_breakout_hold === true || judgment.diagnostics?.fastTrendShift?.box_upper_breakout_hold === true;
             const reclaimConfirmedVal = judgment.metadata?.reclaimConfirmed === true || judgment.metadata?.reclaim_confirmed === true || judgment.transitionPhase === "RETEST_CONFIRMED" || judgment.diagnostics?.fastTrendShift?.box_mid_reclaimed === true;
-            if ((upperBreakoutHold || reclaimConfirmedVal) && qualityScore >= 67 && trendOk === true) {
+            const continuationConfirmed = upperLongContinuationEval.confirmed;
+            if ((upperBreakoutHold || reclaimConfirmedVal || continuationConfirmed) && qualityScore >= 65 && trendOk === true) {
                 const hasSameSidePos = v2State.currentPositions.some(p => p.symbol === input.symbol && String(p.side).toLowerCase() === "long");
                 const hasOppositeSidePos = v2State.currentPositions.some(p => p.symbol === input.symbol && String(p.side).toLowerCase() === "short");
                 const canPromoteTrendLong =
@@ -4436,8 +4525,12 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
                 if (canPromoteTrendLong) {
                     const trendStops = calculateAuthoritativeTrendStructuralStop(authoritativeInput.snapshot, "long");
-                    const candidateStop = trendStops?.stopPrice ?? trendStops?.invalidationPx ?? null;
                     const entryPrice = Number(authoritativeInput.snapshot.lastPrice ?? 0);
+                    const atrVal = Number(authoritativeInput.snapshot.atr ?? 0);
+                    let candidateStop = trendStops?.stopPrice ?? trendStops?.invalidationPx ?? null;
+                    if (typeof candidateStop !== "number" || !Number.isFinite(candidateStop) || candidateStop <= 0 || candidateStop >= entryPrice) {
+                        candidateStop = entryPrice - Math.max(entryPrice * 0.002, atrVal * 0.5);
+                    }
                     const isValidTrendStop =
                         typeof candidateStop === "number" &&
                         Number.isFinite(candidateStop) &&
@@ -4461,7 +4554,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                         v2RejectReasonAfterPromotion = null;
                         conflictResolvedTrendLong = true;
                         conflictResolutionAction = "enter_long_probe";
-                        conflictResolutionReason = "trend_long_breakout_hold_or_reclaim_confirmed";
+                        conflictResolutionReason = upperLongContinuationEval.breakoutBreakdownSubstituted ? "trend_long_continuation_confirmed" : "trend_long_breakout_hold_or_reclaim_confirmed";
                         v2CalculatedInvalidationPx = candidateStop;
 
                         execMeta.entryReason = "V2_CONFLICT_RESOLVED_TREND_LONG";
@@ -4474,6 +4567,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         const continuationPromotionProtected =
             promotionApplied === true &&
             (promotionReason === "V2_UPPER_LONG_PROBE_PROMOTION" ||
+             promotionReason === "V2_UPPER_LONG_BREAKOUT_CONTINUATION_PROMOTION" ||
+             promotionReason === "V2_CONFLICT_RESOLVED_TREND_LONG" ||
              promotionReason === "V2_RANGE_TREND_RECLAIM_MICRO_PROBE");
         const ftsUpperLongStructuralForConflict = evaluateFastTrendShiftUpperLongZoneConfirmed({
             fastTrendShift: judgment.diagnostics?.fastTrendShift ?? null,
@@ -4525,6 +4620,19 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             range_side_candidate: rangeSideCandidate,
             trend_side_candidate: trendSideCandidate,
             zone,
+            continuation_lineage: upperLongContinuationEval.continuationLineage ?? false,
+            range_trend_conflict_detected: localConflict,
+            range_trend_conflict_bypassed: conflictResolvedTrendLong || conflictResolvedUpperShort,
+            conflict_bypass_reason: conflictResolutionReason,
+            chase_zone: zone,
+            chase_block_original_reason: !conflictResolvedUpperShort && !conflictResolvedTrendLong ? "CHASE_LONG_DISALLOWED_UPPER" : null,
+            continuation_confirmation_passed: upperLongContinuationEval.continuationConfirmationPassed ?? false,
+            continuation_confirmation_score: upperLongContinuationEval.continuationScore ?? 0,
+            breakout_breakdown_required: !upperLongContinuationEval.breakoutBreakdownSubstituted,
+            breakout_breakdown_substituted_by_continuation: upperLongContinuationEval.breakoutBreakdownSubstituted ?? false,
+            final_side: v2SideAfterPromotion,
+            final_decision: v2DecisionAfterPromotion,
+            final_reject_reason: v2RejectReasonAfterPromotion,
             reversal_confirmed: reversalConfirmed,
             upper_breakout_hold: judgment.metadata?.box_upper_breakout_hold === true || judgment.metadata?.upper_breakout_hold === true || judgment.diagnostics?.fastTrendShift?.box_upper_breakout_hold === true,
             reclaim_confirmed: judgment.metadata?.reclaimConfirmed === true,
@@ -4567,11 +4675,87 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             }
         }
 
+        const continuationStateForLowerConflict = rangeContinuationStateMap.get(String(input.symbol));
+        const execMetaForLowerConflict = execMeta as Record<string, unknown>;
+        const judgmentMetaForLowerConflict = (judgment.metadata ?? {}) as Record<string, unknown>;
+        const authSnapForLowerConflict = authoritativeInput.snapshot as unknown as Record<string, unknown>;
+        const inputSnapForLowerConflict = input.snapshot as unknown as Record<string, unknown>;
+        const conflictClosedCloseLower =
+            typeof authSnapForLowerConflict.closedClose === "number"
+                ? authSnapForLowerConflict.closedClose
+                : (typeof inputSnapForLowerConflict.closedClose === "number"
+                    ? inputSnapForLowerConflict.closedClose
+                    : null);
+
+        const lowerShortContinuationEval = evaluateLowerBreakdownShortConfirmed({
+            trendSideCandidate: "short",
+            zone,
+            boxBreakSide,
+            boxLow: Number(authSnapForLowerConflict.boxLow ?? inputSnapForLowerConflict.boxLow ?? 0),
+            boxHigh: Number(authSnapForLowerConflict.boxHigh ?? inputSnapForLowerConflict.boxHigh ?? 0),
+            boxPos: Number(boxPos ?? 0.5),
+            atr: Number(authSnapForLowerConflict.atr ?? inputSnapForLowerConflict.atr ?? 0),
+            qualityScore,
+            candles: input.candles ?? authoritativeInput.snapshot?.candles,
+            fastTrendShift: judgment.diagnostics?.fastTrendShift ?? null,
+            opposingStrongHighway: highwayAuth.strongUp,
+            directionalShock: shock,
+            closedClose: conflictClosedCloseLower,
+            lastPrice: Number(authSnapForLowerConflict.lastPrice ?? inputSnapForLowerConflict.lastPrice ?? 0),
+            previousConfirmedBoxLow: continuationStateForLowerConflict?.previousConfirmedBoxLow ?? null,
+            previousConfirmedBoxHigh: continuationStateForLowerConflict?.previousConfirmedBoxHigh ?? null,
+            emaGap,
+            htfEntryPolicy: judgment.htf_entry_policy ?? "NEUTRAL_HTF_DATA_WAIT",
+            htfRequiresStrongerConfirmation: judgment.htf_requires_stronger_confirmation === true,
+            counterTrendRisk: judgment.counter_trend_risk === true,
+            riskLongAllow,
+            riskShortAllow,
+            allowNewLong,
+            allowNewShort,
+            whipsawShockRecheckActive,
+            hardBlockPresent,
+            paperExecutionReady,
+            signedExecutionReady,
+            hasSameSidePosition: v2State.currentPositions.some(p => p.symbol === input.symbol && String(p.side).toLowerCase() === "short"),
+            hasOppositeSidePosition: v2State.currentPositions.some(p => p.symbol === input.symbol && String(p.side).toLowerCase() === "long"),
+            judgmentSubtype: String(judgment.subtype ?? ""),
+            rangePhase: judgment.rangePhase ?? null,
+            transitionPhase: judgment.transitionPhase ?? null,
+            continuationDirection:
+                typeof execMetaForLowerConflict.continuationDirection === "string"
+                    ? String(execMetaForLowerConflict.continuationDirection)
+                    : continuationStateForLowerConflict?.direction ?? null,
+            continuationPhase:
+                typeof execMetaForLowerConflict.continuationPhase === "string"
+                    ? String(execMetaForLowerConflict.continuationPhase)
+                    : continuationStateForLowerConflict?.phase ?? null,
+            retestConfirmed:
+                execMetaForLowerConflict.retest_confirmed === true ||
+                judgmentMetaForLowerConflict.retestConfirmed === true ||
+                authSnapForLowerConflict.retestConfirmed === true ||
+                inputSnapForLowerConflict.retestConfirmed === true,
+            retestTouched:
+                execMetaForLowerConflict.retestTouched === true ||
+                judgmentMetaForLowerConflict.retestTouched === true ||
+                authSnapForLowerConflict.retestTouched === true ||
+                inputSnapForLowerConflict.retestTouched === true,
+            retestRejected:
+                execMetaForLowerConflict.retestRejected === true ||
+                judgmentMetaForLowerConflict.retestRejected === true ||
+                authSnapForLowerConflict.retestRejected === true ||
+                inputSnapForLowerConflict.retestRejected === true,
+            reversalConfirmed,
+            execReason: typeof execution.reason === "string" ? execution.reason : null,
+            lateChaseBlocked: execMetaForLowerConflict.late_chase_blocked === true,
+            retestRequired: execMetaForLowerConflict.retest_required === true
+        });
+
         // trend short
         if (!conflictResolvedLowerLong && trendSideCandidate === "short" && !(stairStepResult.detected && stairStepResult.direction === "DOWN")) {
             const lowerBreakdownHold = judgment.metadata?.box_lower_breakdown_hold === true || judgment.metadata?.lower_breakdown_hold === true || judgment.diagnostics?.fastTrendShift?.box_lower_breakdown_hold === true;
             const reclaimLostVal = judgment.metadata?.reclaimLost === true || judgment.metadata?.reclaim_lost === true || judgment.transitionPhase === "RETEST_CONFIRMED" || judgment.diagnostics?.fastTrendShift?.box_mid_lost === true;
-            if ((lowerBreakdownHold || reclaimLostVal) && qualityScore >= 67 && trendOk === true) {
+            const continuationConfirmed = lowerShortContinuationEval.confirmed;
+            if ((lowerBreakdownHold || reclaimLostVal || continuationConfirmed) && qualityScore >= 65 && trendOk === true) {
                 const hasSameSidePos = v2State.currentPositions.some(p => p.symbol === input.symbol && String(p.side).toLowerCase() === "short");
                 const hasOppositeSidePos = v2State.currentPositions.some(p => p.symbol === input.symbol && String(p.side).toLowerCase() === "long");
                 const canPromoteTrendShort =
@@ -4587,8 +4771,12 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
                 if (canPromoteTrendShort) {
                     const trendStops = calculateAuthoritativeTrendStructuralStop(authoritativeInput.snapshot, "short");
-                    const candidateStop = trendStops?.stopPrice ?? trendStops?.invalidationPx ?? null;
                     const entryPrice = Number(authoritativeInput.snapshot.lastPrice ?? 0);
+                    const atrVal = Number(authoritativeInput.snapshot.atr ?? 0);
+                    let candidateStop = trendStops?.stopPrice ?? trendStops?.invalidationPx ?? null;
+                    if (typeof candidateStop !== "number" || !Number.isFinite(candidateStop) || candidateStop <= 0 || candidateStop <= entryPrice) {
+                        candidateStop = entryPrice + Math.max(entryPrice * 0.002, atrVal * 0.5);
+                    }
                     const isValidTrendStop =
                         typeof candidateStop === "number" &&
                         Number.isFinite(candidateStop) &&
@@ -4612,7 +4800,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                         v2RejectReasonAfterPromotion = null;
                         conflictResolvedTrendShort = true;
                         conflictResolutionAction = "enter_short_probe";
-                        conflictResolutionReason = "trend_short_breakdown_hold_or_loss_confirmed";
+                        conflictResolutionReason = lowerShortContinuationEval.breakoutBreakdownSubstituted ? "trend_short_continuation_confirmed" : "trend_short_breakdown_hold_or_loss_confirmed";
                         v2CalculatedInvalidationPx = candidateStop;
 
                         execMeta.entryReason = "V2_CONFLICT_RESOLVED_TREND_SHORT";
@@ -4625,6 +4813,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         const continuationPromotionProtected =
             promotionApplied === true &&
             (promotionReason === "V2_LOWER_SHORT_PROBE_PROMOTION" ||
+             promotionReason === "V2_LOWER_SHORT_BREAKDOWN_CONTINUATION_PROMOTION" ||
+             promotionReason === "V2_CONFLICT_RESOLVED_TREND_SHORT" ||
              promotionReason === "V2_RANGE_TREND_RECLAIM_MICRO_PROBE");
         const ftsLowerShortStructuralForConflict = evaluateFastTrendShiftLowerShortZoneConfirmed({
             fastTrendShift: judgment.diagnostics?.fastTrendShift ?? null,
@@ -4676,6 +4866,19 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             range_side_candidate: rangeSideCandidate,
             trend_side_candidate: trendSideCandidate,
             zone,
+            continuation_lineage: lowerShortContinuationEval.continuationLineage ?? false,
+            range_trend_conflict_detected: localConflict,
+            range_trend_conflict_bypassed: conflictResolvedTrendShort || conflictResolvedLowerLong,
+            conflict_bypass_reason: conflictResolutionReason,
+            chase_zone: zone,
+            chase_block_original_reason: !conflictResolvedLowerLong && !conflictResolvedTrendShort ? "CHASE_SHORT_DISALLOWED_LOWER" : null,
+            continuation_confirmation_passed: lowerShortContinuationEval.continuationConfirmationPassed ?? false,
+            continuation_confirmation_score: lowerShortContinuationEval.continuationScore ?? 0,
+            breakout_breakdown_required: !lowerShortContinuationEval.breakoutBreakdownSubstituted,
+            breakout_breakdown_substituted_by_continuation: lowerShortContinuationEval.breakoutBreakdownSubstituted ?? false,
+            final_side: v2SideAfterPromotion,
+            final_decision: v2DecisionAfterPromotion,
+            final_reject_reason: v2RejectReasonAfterPromotion,
             reversal_confirmed: reversalConfirmed,
             lower_breakdown_hold: judgment.metadata?.box_lower_breakdown_hold === true || judgment.metadata?.lower_breakdown_hold === true || judgment.diagnostics?.fastTrendShift?.box_lower_breakdown_hold === true,
             reclaim_lost: judgment.metadata?.reclaimLost === true || judgment.diagnostics?.fastTrendShift?.box_mid_lost === true,
@@ -5829,6 +6032,13 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         boxBreakSide,
         boxLow: Number(authoritativeInput.snapshot.boxLow ?? 0),
         boxHigh: Number(authoritativeInput.snapshot.boxHigh ?? 0),
+        boxPos: Number(boxPos ?? 0.5),
+        atr: Number(authoritativeInput.snapshot.atr ?? 0),
+        qualityScore,
+        candles: input.candles ?? authoritativeInput.snapshot?.candles,
+        fastTrendShift: judgment.diagnostics?.fastTrendShift ?? null,
+        opposingStrongHighway: highwayAuth.strongDown,
+        directionalShock: shock,
         closedClose:
             typeof authoritativeInput.snapshot.closedClose === "number"
                 ? authoritativeInput.snapshot.closedClose
@@ -6817,6 +7027,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         const isTrendContinuationRevalidatedPromotion = promotionReason === "V2_TREND_CONTINUATION_REVALIDATED";
         const isPolarityReversalMicroProbePromotion = promotionReason === "V2_POLARITY_REVERSAL_MICRO_PROBE";
         const isConflictResolvedTrendLongPromotion = promotionReason === "V2_CONFLICT_RESOLVED_TREND_LONG";
+        const isConflictResolvedTrendShortPromotion = promotionReason === "V2_CONFLICT_RESOLVED_TREND_SHORT";
+        const isLowerShortBreakdownContinuationPromotion = promotionReason === "V2_LOWER_SHORT_BREAKDOWN_CONTINUATION_PROMOTION";
+        const isUpperLongProbePromotion = promotionReason === "V2_UPPER_LONG_PROBE_PROMOTION";
         const isRangeTrendReclaimProbePromotion = promotionReason === "V2_RANGE_TREND_RECLAIM_MICRO_PROBE";
         if (sideFinal === "short" && zone === "lower") {
             const isFastTrendShiftLowerShort =
@@ -6852,6 +7065,13 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     boxBreakSide,
                     boxLow: Number(authSnapTier55.boxLow ?? inputSnapTier55.boxLow ?? 0),
                     boxHigh: Number(authSnapTier55.boxHigh ?? inputSnapTier55.boxHigh ?? 0),
+                    boxPos: Number(boxPos ?? 0.5),
+                    atr: Number(authSnapTier55.atr ?? inputSnapTier55.atr ?? 0),
+                    qualityScore,
+                    candles: input.candles ?? authoritativeInput.snapshot?.candles,
+                    fastTrendShift: judgment.diagnostics?.fastTrendShift ?? null,
+                    opposingStrongHighway: highwayAuth.strongUp,
+                    directionalShock: shock,
                     closedClose: tier55ClosedClose,
                     lastPrice: Number(authSnapTier55.lastPrice ?? inputSnapTier55.lastPrice ?? 0),
                     previousConfirmedBoxLow: continuationStateTier55?.previousConfirmedBoxLow ?? null,
@@ -6937,6 +7157,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     (isTrendContinuationRevalidatedPromotion && sideFinal === "short") ||
                     (isPolarityReversalMicroProbePromotion && sideFinal === "short") ||
                     (isConflictResolvedTrendShortPromotion && sideFinal === "short") ||
+                    (isLowerShortBreakdownContinuationPromotion && sideFinal === "short") ||
                     (isRangeTrendReclaimProbePromotion && sideFinal === "short") ||
                     (shortReversalWatchPromoted && sideFinal === "short") ||
                     (promotionReason === "V2_SHORT_REVERSAL_WATCH_PROBE" && sideFinal === "short") ||
@@ -7002,6 +7223,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 (isTrendContinuationRevalidatedPromotion && sideFinal === "long") ||
                 (isPolarityReversalMicroProbePromotion && sideFinal === "long") ||
                 (isConflictResolvedTrendLongPromotion && sideFinal === "long") ||
+                (isUpperLongProbePromotion && sideFinal === "long") ||
                 (isRangeTrendReclaimProbePromotion && sideFinal === "long") ||
                 (isFastTrendShiftUpperLong && fastTrendShiftUpperLongConfirmed);
             const htfStrongBearish = htfHardBlockReason === "STRONG_BEARISH_HTF_ALIGNMENT";
@@ -8800,6 +9022,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                             side: sideForTp,
                             regime: String(judgment.regime),
                             marketSubtype: judgment.subtype ?? null,
+                            promotionReason: promotionReason ?? (judgment as any)?.promotion_reason ?? null,
                             entryPrice: lastPx,
                             boxHigh:
                                 typeof authoritativeInput.snapshot?.boxHigh === "number"
