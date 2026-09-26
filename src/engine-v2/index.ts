@@ -7177,8 +7177,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             const isFastTrendShiftUpperLong =
                 judgment.subtype === "FAST_TREND_SHIFT" &&
                 judgment.diagnostics?.fastTrendShift?.direction === "long";
-            let fastTrendShiftUpperLongConfirmed = false;
+            let fastTrendShiftUpperBreakoutConfirmed = false;
             if (isFastTrendShiftUpperLong) {
+                const continuationStateTier55Upper = rangeContinuationStateMap.get(String(input.symbol));
+                const judgmentMetaTier55Upper = (judgment.metadata ?? {}) as Record<string, unknown>;
                 const execMetaTier55Upper = execMeta as Record<string, unknown>;
                 const authSnapTier55Upper = authoritativeInput.snapshot as unknown as Record<string, unknown>;
                 const inputSnapTier55Upper = input.snapshot as unknown as Record<string, unknown>;
@@ -7188,11 +7190,79 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 const hasOppositeSidePosTier55Upper = v2State.currentPositions.some(
                     (p) => p.symbol === input.symbol && String(p.side).toLowerCase() === "short"
                 );
+                const tier55ClosedCloseUpper =
+                    typeof authSnapTier55Upper.closedClose === "number"
+                        ? authSnapTier55Upper.closedClose
+                        : (typeof inputSnapTier55Upper.closedClose === "number"
+                            ? inputSnapTier55Upper.closedClose
+                            : null);
                 const tier55BoxMidUpper =
                     typeof authSnapTier55Upper.boxHigh === "number" && typeof authSnapTier55Upper.boxLow === "number"
                         ? (Number(authSnapTier55Upper.boxHigh) + Number(authSnapTier55Upper.boxLow)) / 2
                         : null;
-                fastTrendShiftUpperLongConfirmed = evaluateFastTrendShiftUpperLongZoneConfirmed({
+                const upperBreakoutEval = evaluateUpperBreakoutLongConfirmed({
+                    trendSideCandidate: "long",
+                    zone,
+                    boxBreakSide,
+                    boxLow: Number(authSnapTier55Upper.boxLow ?? inputSnapTier55Upper.boxLow ?? 0),
+                    boxHigh: Number(authSnapTier55Upper.boxHigh ?? inputSnapTier55Upper.boxHigh ?? 0),
+                    boxPos: Number(boxPos ?? 0.5),
+                    atr: Number(authSnapTier55Upper.atr ?? inputSnapTier55Upper.atr ?? 0),
+                    qualityScore,
+                    candles: input.candles ?? authoritativeInput.snapshot?.candles,
+                    fastTrendShift: judgment.diagnostics?.fastTrendShift ?? null,
+                    opposingStrongHighway: highwayAuth.strongDown,
+                    directionalShock: shock,
+                    closedClose: tier55ClosedCloseUpper,
+                    lastPrice: Number(authSnapTier55Upper.lastPrice ?? inputSnapTier55Upper.lastPrice ?? 0),
+                    previousConfirmedBoxLow: continuationStateTier55Upper?.previousConfirmedBoxLow ?? null,
+                    previousConfirmedBoxHigh: continuationStateTier55Upper?.previousConfirmedBoxHigh ?? null,
+                    emaGap,
+                    htfEntryPolicy: judgment.htf_entry_policy ?? "NEUTRAL_HTF_DATA_WAIT",
+                    htfRequiresStrongerConfirmation: judgment.htf_requires_stronger_confirmation === true,
+                    counterTrendRisk: judgment.counter_trend_risk === true,
+                    riskLongAllow,
+                    riskShortAllow,
+                    allowNewLong,
+                    allowNewShort,
+                    whipsawShockRecheckActive,
+                    hardBlockPresent,
+                    paperExecutionReady,
+                    signedExecutionReady,
+                    hasSameSidePosition: hasSameSidePosTier55Upper,
+                    hasOppositeSidePosition: hasOppositeSidePosTier55Upper,
+                    judgmentSubtype: String(judgment.subtype ?? ""),
+                    rangePhase: judgment.rangePhase ?? null,
+                    transitionPhase: judgment.transitionPhase ?? null,
+                    continuationDirection:
+                        typeof execMetaTier55Upper.continuationDirection === "string"
+                            ? String(execMetaTier55Upper.continuationDirection)
+                            : continuationStateTier55Upper?.direction ?? null,
+                    continuationPhase:
+                        typeof execMetaTier55Upper.continuationPhase === "string"
+                            ? String(execMetaTier55Upper.continuationPhase)
+                            : continuationStateTier55Upper?.phase ?? null,
+                    retestConfirmed:
+                        execMetaTier55Upper.retest_confirmed === true ||
+                        judgmentMetaTier55Upper.retestConfirmed === true ||
+                        authSnapTier55Upper.retestConfirmed === true ||
+                        inputSnapTier55Upper.retestConfirmed === true,
+                    retestTouched:
+                        execMetaTier55Upper.retestTouched === true ||
+                        judgmentMetaTier55Upper.retestTouched === true ||
+                        authSnapTier55Upper.retestTouched === true ||
+                        inputSnapTier55Upper.retestTouched === true,
+                    retestRejected:
+                        execMetaTier55Upper.retestRejected === true ||
+                        judgmentMetaTier55Upper.retestRejected === true ||
+                        authSnapTier55Upper.retestRejected === true ||
+                        inputSnapTier55Upper.retestRejected === true,
+                    reversalConfirmed,
+                    execReason: typeof execution.reason === "string" ? execution.reason : null,
+                    lateChaseBlocked: execMetaTier55Upper.late_chase_blocked === true,
+                    retestRequired: execMetaTier55Upper.retest_required === true
+                });
+                const fastTrendShiftUpperStructuralConfirmed = evaluateFastTrendShiftUpperLongZoneConfirmed({
                     fastTrendShift: judgment.diagnostics?.fastTrendShift ?? null,
                     zone,
                     trendOk: trendOk === true,
@@ -7212,6 +7282,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     boxMid: tier55BoxMidUpper,
                     lastPrice: Number(authSnapTier55Upper.lastPrice ?? inputSnapTier55Upper.lastPrice ?? 0)
                 }).confirmed;
+                fastTrendShiftUpperBreakoutConfirmed =
+                    fastTrendShiftUpperStructuralConfirmed || upperBreakoutEval.confirmed;
             }
             const longException =
                 breakoutRetestConfirmation ||
@@ -7225,7 +7297,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 (isConflictResolvedTrendLongPromotion && sideFinal === "long") ||
                 (isUpperLongProbePromotion && sideFinal === "long") ||
                 (isRangeTrendReclaimProbePromotion && sideFinal === "long") ||
-                (isFastTrendShiftUpperLong && fastTrendShiftUpperLongConfirmed);
+                (isFastTrendShiftUpperLong && fastTrendShiftUpperBreakoutConfirmed);
             const htfStrongBearish = htfHardBlockReason === "STRONG_BEARISH_HTF_ALIGNMENT";
 
             if (!longException || (htfStrongBearish && !isPolarityReversalMicroProbePromotion && !isConflictResolvedTrendLongPromotion && !isRangeTrendReclaimProbePromotion)) {
