@@ -23401,17 +23401,26 @@ export class PaperEngine {
               invalidationPx: stopPrice,
               ...((): Partial<PaperOpenPositionRecord> => {
                 const md = envelope.selector?.v2_result?.metadata as Record<string, unknown> | undefined;
-                if (md?.entrySemantic !== "V2_POST_SHOCK_COUNTER_PROBE") return {};
-                return {
-                  entrySemantic: "V2_POST_SHOCK_COUNTER_PROBE",
-                  postShockProbeEpisodeId:
-                    typeof md.postShockProbeEpisodeId === "string" ? md.postShockProbeEpisodeId : undefined,
-                  postShockProbePromotionState:
-                    md.postShockProbePromotionState === "PROBE_ONLY" ||
-                    md.postShockProbePromotionState === "STANDARD_PROMOTED"
-                      ? md.postShockProbePromotionState
-                      : "PROBE_ONLY"
-                };
+                if (md?.entrySemantic === "V2_POST_SHOCK_COUNTER_PROBE") {
+                  return {
+                    entrySemantic: "V2_POST_SHOCK_COUNTER_PROBE",
+                    isHighwayLineage: false,
+                    postShockProbeEpisodeId:
+                      typeof md.postShockProbeEpisodeId === "string" ? md.postShockProbeEpisodeId : undefined,
+                    postShockProbePromotionState:
+                      md.postShockProbePromotionState === "PROBE_ONLY" ||
+                      md.postShockProbePromotionState === "STANDARD_PROMOTED"
+                        ? md.postShockProbePromotionState
+                        : "PROBE_ONLY"
+                  };
+                }
+                if (authority.isHighwayLineage === true) {
+                  return {
+                    isHighwayLineage: true,
+                    entrySemantic: authority.entrySemantic ?? "HIGHWAY_CORE"
+                  };
+                }
+                return { isHighwayLineage: false };
               })()
             };
             if (isPending) {
@@ -26040,6 +26049,7 @@ export class PaperEngine {
       targetPrice1: tp1Px,
       partialExitRatio: typeof v2Decision.metadata?.partialExitRatio === "number" ? v2Decision.metadata.partialExitRatio : undefined,
       entrySemantic: typeof v2Decision.metadata?.entrySemantic === "string" ? v2Decision.metadata.entrySemantic : undefined,
+      isHighwayLineage: v2Decision.metadata?.isHighwayLineage === true,
       postShockProbeEpisodeId:
         typeof v2Decision.metadata?.postShockProbeEpisodeId === "string"
           ? v2Decision.metadata.postShockProbeEpisodeId
@@ -26757,6 +26767,7 @@ export function buildV2StateBridge(
           lifecycleState: p.lifecycleState,
           manualAugmentActive: p.manualAugmentActive === true || p.lifecycleState === "MANUAL_SIZE_AUGMENTED",
           entrySemantic: p.entrySemantic,
+          isHighwayLineage: p.isHighwayLineage === true,
           postShockProbeEpisodeId: p.postShockProbeEpisodeId,
           postShockProbePromotionState: p.postShockProbePromotionState
         };

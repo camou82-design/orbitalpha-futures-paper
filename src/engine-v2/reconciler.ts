@@ -12,6 +12,7 @@ import {
     LegacySnapshotAdapter,
     LegacyConfigAdapter
 } from "./types";
+import { resolveCanonicalHighwayLineage } from "./highway-core/highway-lineage-authority";
 import { adaptV2Input, runEngineV2 } from "./index";
 import { buildV2ExecutionAuthorityEnvelope } from "./execution/envelope";
 import type { V2ExecutionAuthorityEnvelope, V2LegacyComparison } from "./execution/types";
@@ -261,9 +262,21 @@ export function deriveExecutionAuthority(
                 : undefined,
         isHighwayLineage:
             useV2 &&
-            (Boolean(selector.v2_result.metadata?.isHighwayLineage) ||
-                selector.v2_result.metadata?.entrySemantic === "HIGHWAY" ||
-                selector.v2_result.metadata?.entrySemantic === "HIGHWAY_CORE"),
+            resolveCanonicalHighwayLineage({
+                isHighwayLineageExplicit: selector.v2_result.metadata?.isHighwayLineage === true,
+                entrySemantic:
+                    typeof selector.v2_result.metadata?.entrySemantic === "string"
+                        ? selector.v2_result.metadata.entrySemantic
+                        : null,
+                promotionReason:
+                    typeof selector.v2_result.metadata?.promotion_reason === "string"
+                        ? selector.v2_result.metadata.promotion_reason
+                        : null,
+                judgmentSubtype:
+                    typeof selector.v2_result.metadata?.judgment_subtype === "string"
+                        ? selector.v2_result.metadata.judgment_subtype
+                        : null
+            }),
         postShockProbeEpisodeId:
             useV2 && typeof selector.v2_result.metadata?.postShockProbeEpisodeId === "string"
                 ? selector.v2_result.metadata.postShockProbeEpisodeId

@@ -961,6 +961,8 @@ export type PaperOpenPositionRecord = {
 
   /** V2 probe 진입 사유 (EARLY_REVERSAL_SHORT_PROBE 등) - exit/partial 단계에서 읽음. */
   v2EntryReason?: string;
+  /** Highway branched lifecycle (25% / 22.5% / 25% sizing authority). */
+  isHighwayLineage?: boolean;
   entrySemantic?: string;
   postShockProbeEpisodeId?: string;
   postShockProbePromotionState?: "PROBE_ONLY" | "STANDARD_PROMOTED";

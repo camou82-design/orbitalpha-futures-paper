@@ -65,6 +65,11 @@ import { resolveV2AuthoritativeCandleIdentity } from "./execution/authoritative-
 import { applyEthRangeMinimumStopDistance } from "./execution/eth-range-minimum-stop-authority";
 import { evaluateHighwayCoreEntryGate } from "./highway-core/highway-entry-gate";
 import { resolveHighwayDirectionalAuthority } from "./highway-core/highway-directional-authority";
+import {
+    resolveCanonicalHighwayLineage,
+    resolveHighwayLineageFromOpenPosition,
+    resolveInitialHighwayLineageAssignment
+} from "./highway-core/highway-lineage-authority";
 import { isSoftExitCooldownActive } from "./exit/soft-exit-hysteresis";
 import { evaluateShortReversalWatch } from "./market-judgment/short-reversal-watch";
 import { evaluateLongReversalWatch } from "./market-judgment/long-reversal-watch";
@@ -8826,6 +8831,35 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     ? ((input.config as any)?.okxLiveV2EthMaxOrderNotionalUsdt ?? (input.config as any)?.okx_live_v2_eth_max_order_notional_usdt ?? 1200)
                     : ((input.config as any)?.okxLiveV2MaxOrderNotionalUsdt ?? (input.config as any)?.okx_live_v2_max_order_notional_usdt ?? 500);
 
+                const execMetaForHighway = (execution?.metadata ?? {}) as Record<string, unknown>;
+                const canonicalHighwayLineageForSizing = isAddOn
+                    ? resolveHighwayLineageFromOpenPosition(sameSymbolPos)
+                    : resolveInitialHighwayLineageAssignment({
+                          isAddOn,
+                          finalDecisionEnter:
+                              finalDecision === "ENTER" &&
+                              (v2SideAfterPromotion === "long" || v2SideAfterPromotion === "short"),
+                          highwayGateRejected,
+                          isMicroProbe:
+                              ethRangeQualityResult?.isProbe === true
+                                  ? false
+                                  : (isMicroProbe ||
+                                        (probeSizingSource !== "NONE" &&
+                                            probeSizingSource !== "ETH_RANGE_LOCATION_PROBE" &&
+                                            probeSizingSource !== "ETH_RANGE_UNCONFIRMED_PROBE" &&
+                                            probeSizingSource !== "ETH_RANGE_COUNTERTREND_EXTREME_PROBE" &&
+                                            probeSizingSource !== "ETH_RANGE_COUNTERTREND_EDGE_PROBE")),
+                          promotionApplied,
+                          promotionReason,
+                          judgmentRegime: judgment.regime_final ?? judgment.regime ?? null,
+                          judgmentSubtype: judgment.subtype ?? null,
+                          executionMetadata: execMetaForHighway,
+                          executionEntrySemantic:
+                              typeof (execution as { entrySemantic?: string }).entrySemantic === "string"
+                                  ? (execution as { entrySemantic?: string }).entrySemantic ?? null
+                                  : null
+                      });
+
                 const sizingResult = evaluateEquityAdaptiveSizing({
                     symbol: String(input.symbol),
                     side: sideCand === "short" ? "short" : "long",
@@ -8869,7 +8903,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                             probeSizingSource !== "ETH_RANGE_UNCONFIRMED_PROBE" &&
                             probeSizingSource !== "ETH_RANGE_COUNTERTREND_EXTREME_PROBE" &&
                             probeSizingSource !== "ETH_RANGE_COUNTERTREND_EDGE_PROBE"
-                        ))
+                        )),
+                    isHighwayLineage: canonicalHighwayLineageForSizing
                 });
 
                 equityAdaptiveSizingAuthority = sizingResult;
@@ -11073,6 +11108,38 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     decision.metadata.market_mode = marketMode;
     decision.metadata.box_pos = typeof boxPos === "number" && Number.isFinite(boxPos) ? boxPos : undefined;
 
+    const execMetaForLineagePersist = (execution?.metadata ?? {}) as Record<string, unknown>;
+    const assignHighwayLineageOnEnter = resolveInitialHighwayLineageAssignment({
+        isAddOn,
+        finalDecisionEnter: isValidEnter,
+        highwayGateRejected,
+        isMicroProbe,
+        promotionApplied,
+        promotionReason,
+        judgmentRegime: judgment.regime_final ?? judgment.regime ?? null,
+        judgmentSubtype: judgment.subtype ?? null,
+        executionMetadata: execMetaForLineagePersist,
+        executionEntrySemantic:
+            typeof (execution as { entrySemantic?: string }).entrySemantic === "string"
+                ? (execution as { entrySemantic?: string }).entrySemantic ?? null
+                : null
+    });
+    if (assignHighwayLineageOnEnter) {
+        decision.metadata.isHighwayLineage = true;
+        if (typeof decision.metadata.entrySemantic !== "string") {
+            decision.metadata.entrySemantic = "HIGHWAY_CORE";
+        }
+    } else if (
+        !resolveCanonicalHighwayLineage({
+            isHighwayLineageExplicit: decision.metadata.isHighwayLineage === true,
+            entrySemantic: typeof decision.metadata.entrySemantic === "string" ? decision.metadata.entrySemantic : null,
+            promotionReason,
+            judgmentSubtype: judgment.subtype ?? null
+        })
+    ) {
+        decision.metadata.isHighwayLineage = false;
+    }
+
     if (isValidEnter) {
         const candleIdentity = resolveV2AuthoritativeCandleIdentity(input.snapshot?.candles ?? null);
         decision.metadata.authoritativeCandleTs = candleIdentity.authoritativeCandleTs ?? undefined;
@@ -11719,7 +11786,7 @@ export function adaptV2Input(
                     managementAvgPx: p.managementAvgPx,
                     lifecycleState: p.lifecycleState,
                     manualAugmentActive: p.manualAugmentActive,
-                    isHighwayLineage: (p as any).isHighwayLineage === true || p.entrySemantic === "HIGHWAY" || p.entrySemantic === "HIGHWAY_CORE",
+                    isHighwayLineage: resolveHighwayLineageFromOpenPosition(p),
                     entrySemantic: p.entrySemantic,
                     postShockProbeEpisodeId: p.postShockProbeEpisodeId,
                     postShockProbePromotionState: p.postShockProbePromotionState

@@ -5,6 +5,13 @@ import { resolveProtectiveTpPlan, shouldAttachFullPositionProtectiveTp } from ".
 import { evaluateConfirmedAdverseAddOn, evaluateDirectionalThesisForAdverseAddon } from "../engine-v2/addon/adverse-addon";
 import { evaluateV2AddOnPolicy } from "../engine-v2/addon/policy";
 import { deriveExecutionAuthority } from "../engine-v2/reconciler";
+import { adaptV2Input } from "../engine-v2/index";
+import { deriveV2StateAuthority } from "../engine-v2/state/derive";
+import {
+  resolveCanonicalHighwayLineage,
+  resolveHighwayLineageFromOpenPosition,
+  resolveInitialHighwayLineageAssignment
+} from "../engine-v2/highway-core/highway-lineage-authority";
 import { resolveLiveSubmitStaticSafetyCap } from "./paper-engine";
 
 describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
@@ -1083,6 +1090,143 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
       "netProtectedProfit at stop must be positive");
     assert.ok(rp.projectedNetProtectedProfitAtStopUsdt <= rp.projectedGrossProtectedProfitAtStopUsdt,
       "net protected profit must be <= gross");
+  });
+
+  it("32. [연결] TREND native initial ENTER → lineage assign + live sizing highway_initial_target 575", () => {
+    const assign = resolveInitialHighwayLineageAssignment({
+      isAddOn: false,
+      finalDecisionEnter: true,
+      highwayGateRejected: false,
+      isMicroProbe: false,
+      promotionApplied: false,
+      promotionReason: null,
+      judgmentRegime: "TREND",
+      judgmentSubtype: "NONE",
+      executionMetadata: {}
+    });
+    assert.equal(assign, true);
+
+    const sizing = evaluateEquityAdaptiveSizing({
+      symbol: "BTCUSDT",
+      side: "long",
+      orderKind: "ENTRY",
+      accountEquityUsdt: DEFAULT_EQUITY,
+      availableBalanceUsdt: DEFAULT_EQUITY,
+      lastPrice: LAST_PRICE,
+      entryReferencePrice: LAST_PRICE,
+      effectiveStopPrice: STOP_PRICE,
+      appliedLeverage: APPLIED_LEVERAGE,
+      entryQualityGrade: "A",
+      existingSymbolNotionalUsdt: 0,
+      existingAccountNotionalUsdt: 0,
+      v2AuthorityEntry: true,
+      v2HardSafetyCapUsdt: 600,
+      isHighwayLineage: true
+    });
+    assert.equal(sizing.limitingAuthority, "highway_initial_target");
+    assert.equal(sizing.preLotNotionalUsdt, 575);
+  });
+
+  it("33. [연결] SHOCK_REACTION_upper_breakout_continuation_long → lineage false, no highway sizing", () => {
+    const promo = "SHOCK_REACTION_upper_breakout_continuation_long";
+    assert.equal(
+      resolveCanonicalHighwayLineage({ promotionReason: promo, judgmentSubtype: "SHOCK_REACTION_UP" }),
+      false
+    );
+    const assign = resolveInitialHighwayLineageAssignment({
+      isAddOn: false,
+      finalDecisionEnter: true,
+      highwayGateRejected: false,
+      isMicroProbe: false,
+      promotionApplied: true,
+      promotionReason: promo,
+      judgmentRegime: "RANGE",
+      judgmentSubtype: "SHOCK_REACTION_UP",
+      executionMetadata: {}
+    });
+    assert.equal(assign, false);
+
+    const sizing = evaluateEquityAdaptiveSizing({
+      symbol: "BTCUSDT",
+      side: "long",
+      orderKind: "ENTRY",
+      accountEquityUsdt: DEFAULT_EQUITY,
+      availableBalanceUsdt: DEFAULT_EQUITY,
+      lastPrice: LAST_PRICE,
+      entryReferencePrice: LAST_PRICE,
+      effectiveStopPrice: STOP_PRICE,
+      appliedLeverage: APPLIED_LEVERAGE,
+      entryQualityGrade: "A",
+      existingSymbolNotionalUsdt: 0,
+      existingAccountNotionalUsdt: 0,
+      v2AuthorityEntry: true,
+      v2HardSafetyCapUsdt: 600,
+      isHighwayLineage: false
+    });
+    assert.notEqual(sizing.limitingAuthority, "highway_initial_target");
+  });
+
+  it("34. [연결] ledger reload via adaptV2Input preserves isHighwayLineage", () => {
+    const bridge = {
+      currentPositions: [
+        {
+          symbol: "BTCUSDT" as const,
+          side: "long" as const,
+          entryPrice: 65000,
+          sizeUsd: 575,
+          entryStage: 1,
+          isHighwayLineage: true,
+          entrySemantic: "HIGHWAY_CORE"
+        }
+      ],
+      globalRiskScore: 0,
+      lossStreaks: {},
+      directionalShockState: "NONE" as const,
+      longAllow: true,
+      shortAllow: true,
+      executionReadiness: true,
+      freshTickBarrierActive: false,
+      freshTickCompletedCycles: 0,
+      freshTickRequiredCycles: 0,
+      serverTradeEnabled: true,
+      accountEquityKrw: 3_220_000
+    };
+    const snapshot = { lastPrice: 65000, latestCandleClose: 65000, qualityScore: 80 };
+    const adapted = adaptV2Input(
+      "BTCUSDT",
+      Date.now(),
+      snapshot as any,
+      { baseSizeUsd: 140000, paperMaxOpenPositions: 5 } as any,
+      bridge as any,
+      {} as any
+    );
+    const pos = adapted.state.currentPositions.find((p) => p.symbol === "BTCUSDT");
+    assert.equal(resolveHighwayLineageFromOpenPosition(pos), true);
+    assert.equal(pos?.isHighwayLineage, true);
+    const v2State = deriveV2StateAuthority(adapted);
+    assert.equal(v2State.longPosition?.isHighwayLineage, true);
+  });
+
+  it("35. [연결] reconciler authority reflects metadata isHighwayLineage for reload path", () => {
+    const authority = deriveExecutionAuthority({
+      adopted_result: {
+        engine: "V2",
+        adopted_decision: "ENTER",
+        adopted_side: "long",
+        adopted_size_usd: 575000,
+        adopted_regime: "TREND"
+      },
+      v2_result: {
+        risk: { isAddOn: false },
+        metadata: {
+          isHighwayLineage: true,
+          entrySemantic: "HIGHWAY_CORE",
+          promotion_reason: null,
+          judgment_subtype: "NONE"
+        }
+      }
+    } as any);
+    assert.equal(authority.isHighwayLineage, true);
   });
 });
 

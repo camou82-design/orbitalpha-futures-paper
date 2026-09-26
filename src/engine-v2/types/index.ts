@@ -300,6 +300,7 @@ export interface LegacyPositionAdapter {
     entrySemantic?: string;
     postShockProbeEpisodeId?: string;
     postShockProbePromotionState?: "PROBE_ONLY" | "STANDARD_PROMOTED";
+    isHighwayLineage?: boolean;
 }
 
 export interface LegacyResultAdapter {
@@ -680,6 +681,7 @@ export interface V2BridgePosition {
     entrySemantic?: string;
     postShockProbeEpisodeId?: string;
     postShockProbePromotionState?: "PROBE_ONLY" | "STANDARD_PROMOTED";
+    isHighwayLineage?: boolean;
 }
 
 export interface V2BridgeState {
