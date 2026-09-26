@@ -130,6 +130,26 @@ export function evaluateHighwayCoreEntryGate(input: HighwayEntryGateInput): High
         isPlanDirectionValid = true;
     }
 
+    const executionReasonStr = String(execution?.reason ?? "").toLowerCase();
+    const execMeta = (execution?.metadata ?? {}) as Record<string, unknown>;
+    const subtypeStr = String(subtype ?? "").toUpperCase();
+    const isNonRangeLineage =
+        subtypeStr === "FAST_TREND_SHIFT" ||
+        subtypeStr === "EARLY_LONG_PROBE" ||
+        subtypeStr === "EARLY_SHORT_PROBE" ||
+        subtypeStr.includes("TREND") ||
+        subtypeStr.includes("BREAKOUT") ||
+        subtypeStr.includes("BREAKDOWN") ||
+        subtypeStr.includes("CONTINUATION") ||
+        executionReasonStr.includes("trend") ||
+        executionReasonStr.includes("continuation") ||
+        executionReasonStr.includes("breakout") ||
+        executionReasonStr.includes("breakdown") ||
+        executionReasonStr.includes("fast_shift") ||
+        executionReasonStr.includes("fast_trend") ||
+        execMeta.trend_continuation === true ||
+        execMeta.fast_trend_shift === true;
+
     // 3. Conservative reachable Expected Move based on actual planned TP1 (no artificial floor)
     let structureRoom: number | null = null;
     if (regime === "RANGE" && boxHigh > 0 && boxLow > 0 && lastPrice > 0) {
@@ -140,12 +160,23 @@ export function evaluateHighwayCoreEntryGate(input: HighwayEntryGateInput): High
         }
     }
 
-    const candidateExpectedMove = structureRoom !== null
-        ? Math.min(tp1DistancePct, structureRoom)
-        : tp1DistancePct;
-    const expectedMovePct = tp1DistancePct > 0
-        ? candidateExpectedMove
-        : 0;
+    let expectedMovePct = 0;
+    let expectedMoveSource: "tp1_distance" | "range_box_cap" | "zero_plan" = "zero_plan";
+
+    if (tp1DistancePct > 0) {
+        if (regime === "RANGE" && !isNonRangeLineage && structureRoom !== null) {
+            if (structureRoom < tp1DistancePct) {
+                expectedMovePct = structureRoom;
+                expectedMoveSource = "range_box_cap";
+            } else {
+                expectedMovePct = tp1DistancePct;
+                expectedMoveSource = "tp1_distance";
+            }
+        } else {
+            expectedMovePct = tp1DistancePct;
+            expectedMoveSource = "tp1_distance";
+        }
+    }
 
     const netEdgePct = expectedMovePct - estimatedCostPct;
     const rewardRisk = stopDistancePct > 0 ? (tp1DistancePct / stopDistancePct) : 0;
@@ -226,24 +257,6 @@ export function evaluateHighwayCoreEntryGate(input: HighwayEntryGateInput): High
 
     // Step 2: 위치 (Position / Location / Structure)
     if (allowed) {
-        const executionReasonStr = String(execution?.reason ?? "").toLowerCase();
-        const execMeta = (execution?.metadata ?? {}) as Record<string, unknown>;
-        const subtypeStr = String(subtype ?? "");
-        const isNonRangeLineage =
-            subtypeStr === "FAST_TREND_SHIFT" ||
-            subtypeStr === "EARLY_LONG_PROBE" ||
-            subtypeStr === "EARLY_SHORT_PROBE" ||
-            subtypeStr.includes("TREND") ||
-            subtypeStr.includes("BREAKOUT") ||
-            subtypeStr.includes("BREAKDOWN") ||
-            executionReasonStr.includes("trend") ||
-            executionReasonStr.includes("continuation") ||
-            executionReasonStr.includes("breakout") ||
-            executionReasonStr.includes("breakdown") ||
-            executionReasonStr.includes("fast_shift") ||
-            execMeta.trend_continuation === true ||
-            execMeta.fast_trend_shift === true;
-
         if (regime === "RANGE" && !isNonRangeLineage && boxPos !== null) {
             // RANGE: Suppress box middle chase. Only allow entry evaluation at edges for canonical RANGE mean-reversion.
             if (side === "long" && boxPos > 0.35) {
@@ -308,6 +321,10 @@ export function evaluateHighwayCoreEntryGate(input: HighwayEntryGateInput): High
         regime,
         boxPos,
         isPreCheck,
+        non_range_lineage: isNonRangeLineage,
+        expected_move_source: expectedMoveSource,
+        structure_room_pct: structureRoom !== null ? Number(structureRoom.toFixed(6)) : null,
+        effective_min_required_move_pct: Number(minRequiredMovePct.toFixed(6)),
         expectedMovePct: Number(expectedMovePct.toFixed(6)),
         estimatedCostPct: Number(estimatedCostPct.toFixed(6)),
         netEdgePct: Number(netEdgePct.toFixed(6)),
