@@ -9,9 +9,13 @@ import { adaptV2Input } from "../engine-v2/index";
 import { deriveV2StateAuthority } from "../engine-v2/state/derive";
 import {
   resolveCanonicalHighwayLineage,
+  resolveHighwayCoreEntryProvenanceEligible,
   resolveHighwayLineageFromOpenPosition,
-  resolveInitialHighwayLineageAssignment
+  resolveInitialHighwayLineageAssignment,
+  stampHighwayCoreEntryProvenance
 } from "../engine-v2/highway-core/highway-lineage-authority";
+import { HighwayTrendState } from "../models/types";
+import type { HighwayDirectionalAuthority } from "../engine-v2/highway-core/highway-directional-authority";
 import { resolveLiveSubmitStaticSafetyCap } from "./paper-engine";
 
 describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
@@ -19,6 +23,52 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
   const APPLIED_LEVERAGE = 10;
   const LAST_PRICE = 65000;
   const STOP_PRICE = 64350; // 1.0% stop dist
+
+  const mockStrongUpHighwayAuth = (): HighwayDirectionalAuthority => ({
+    state: "STRONG_UP",
+    strongUp: true,
+    strongDown: false,
+    ema10: 65100,
+    ema20: 64900,
+    ema60: 64500,
+    ema10SlopeBps: 1,
+    ema20SlopeBps: 0.2,
+    emaGap: 0.002,
+    earlyRecoveryUpEligible: false,
+    earlyRecoveryDownEligible: false,
+    details: {
+      priceAboveEma10: true,
+      priceAboveEma20: true,
+      priceAboveEma60: true,
+      ema10Above20: true,
+      highwayTrendState: HighwayTrendState.VALID,
+      highwayAlignScore: 0.95,
+      lastClosedClose: 65000
+    }
+  });
+
+  const mockWeakTrendHighwayAuth = (): HighwayDirectionalAuthority => ({
+    state: "NEUTRAL",
+    strongUp: false,
+    strongDown: false,
+    ema10: 65000,
+    ema20: 64950,
+    ema60: 64800,
+    ema10SlopeBps: 0.1,
+    ema20SlopeBps: 0,
+    emaGap: 0.0005,
+    earlyRecoveryUpEligible: false,
+    earlyRecoveryDownEligible: false,
+    details: {
+      priceAboveEma10: true,
+      priceAboveEma20: true,
+      priceAboveEma60: true,
+      ema10Above20: true,
+      highwayTrendState: HighwayTrendState.WEAK,
+      highwayAlignScore: 0.7,
+      lastClosedClose: 65000
+    }
+  });
 
   it("1. Highway Initial (isHighwayLineage: true) → Initial target evaluates to ~575 USDT without clipping under 600 cap", () => {
     const res = evaluateEquityAdaptiveSizing({
@@ -1092,7 +1142,7 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
       "net protected profit must be <= gross");
   });
 
-  it("32. [연결] TREND native initial ENTER → lineage assign + live sizing highway_initial_target 575", () => {
+  it("32. [연결] Highway Core evidence (v2EntryReason) → lineage assign + Initial 25% sizing 575", () => {
     const assign = resolveInitialHighwayLineageAssignment({
       isAddOn: false,
       finalDecisionEnter: true,
@@ -1102,7 +1152,7 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
       promotionReason: null,
       judgmentRegime: "TREND",
       judgmentSubtype: "NONE",
-      executionMetadata: {}
+      executionMetadata: { v2EntryReason: "HIGHWAY_CORE_ENTRY" }
     });
     assert.equal(assign, true);
 
@@ -1227,6 +1277,186 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
       }
     } as any);
     assert.equal(authority.isHighwayLineage, true);
+  });
+
+  it("36. [lineage] generic TREND ENTER without Highway markers → assign false", () => {
+    const assign = resolveInitialHighwayLineageAssignment({
+      isAddOn: false,
+      finalDecisionEnter: true,
+      highwayGateRejected: false,
+      isMicroProbe: false,
+      promotionApplied: false,
+      promotionReason: null,
+      judgmentRegime: "TREND",
+      judgmentSubtype: "TREND_MOMENTUM_HEALTHY",
+      executionMetadata: { trend_provenance: "TREND_EXECUTOR_MOMENTUM" }
+    });
+    assert.equal(assign, false);
+  });
+
+  it("37. [lineage] generic TREND preserves non-HIGHWAY entrySemantic (no HIGHWAY_CORE stamp)", () => {
+    const genericSemantic = "TREND_MOMENTUM_HEALTHY";
+    assert.notEqual(genericSemantic, "HIGHWAY_CORE");
+    const assign = resolveInitialHighwayLineageAssignment({
+      isAddOn: false,
+      finalDecisionEnter: true,
+      highwayGateRejected: false,
+      isMicroProbe: false,
+      promotionApplied: false,
+      promotionReason: null,
+      judgmentRegime: "TREND",
+      judgmentSubtype: "TREND_MOMENTUM_HEALTHY",
+      executionMetadata: {},
+      executionEntrySemantic: genericSemantic
+    });
+    assert.equal(assign, false);
+    assert.notEqual(genericSemantic, "HIGHWAY_CORE");
+  });
+
+  it("38. [lineage] generic TREND sizing bridge → no highway_initial_target", () => {
+    const assign = resolveInitialHighwayLineageAssignment({
+      isAddOn: false,
+      finalDecisionEnter: true,
+      highwayGateRejected: false,
+      isMicroProbe: false,
+      promotionApplied: false,
+      promotionReason: null,
+      judgmentRegime: "TREND",
+      judgmentSubtype: "NONE",
+      executionMetadata: {}
+    });
+    assert.equal(assign, false);
+    const sizing = evaluateEquityAdaptiveSizing({
+      symbol: "BTCUSDT",
+      side: "long",
+      orderKind: "ENTRY",
+      accountEquityUsdt: DEFAULT_EQUITY,
+      availableBalanceUsdt: DEFAULT_EQUITY,
+      lastPrice: LAST_PRICE,
+      entryReferencePrice: LAST_PRICE,
+      effectiveStopPrice: STOP_PRICE,
+      appliedLeverage: APPLIED_LEVERAGE,
+      entryQualityGrade: "A",
+      existingSymbolNotionalUsdt: 0,
+      existingAccountNotionalUsdt: 0,
+      v2AuthorityEntry: true,
+      v2HardSafetyCapUsdt: 600,
+      isHighwayLineage: assign
+    });
+    assert.notEqual(sizing.limitingAuthority, "highway_initial_target");
+    assert.equal(sizing.preLotNotionalUsdt, 600);
+  });
+
+  it("39. [lineage] FAST_TREND_SHIFT → assign false even with Highway v2EntryReason", () => {
+    const assign = resolveInitialHighwayLineageAssignment({
+      isAddOn: false,
+      finalDecisionEnter: true,
+      highwayGateRejected: false,
+      isMicroProbe: false,
+      promotionApplied: false,
+      promotionReason: null,
+      judgmentRegime: "TREND",
+      judgmentSubtype: "FAST_TREND_SHIFT",
+      executionMetadata: { v2EntryReason: "HIGHWAY_CORE_ENTRY" }
+    });
+    assert.equal(assign, false);
+  });
+
+  it("40. [live-path] Highway Core gate+VALID+strongUp stamp → assign true → highway_initial_target 575", () => {
+    const eligible = resolveHighwayCoreEntryProvenanceEligible({
+      initialEntryCandidate: true,
+      highwayGateAllowed: true,
+      highwayGateRejected: false,
+      nativeTrendExecutor: true,
+      promotionApplied: false,
+      promotionReason: null,
+      judgmentSubtype: "TREND_UP_CONTINUATION",
+      executionEntrySemantic: null,
+      side: "long",
+      highwayDirectional: mockStrongUpHighwayAuth()
+    });
+    assert.equal(eligible, true);
+
+    const execMeta: Record<string, unknown> = {};
+    stampHighwayCoreEntryProvenance(execMeta);
+    const assign = resolveInitialHighwayLineageAssignment({
+      isAddOn: false,
+      finalDecisionEnter: true,
+      highwayGateRejected: false,
+      isMicroProbe: false,
+      promotionApplied: false,
+      promotionReason: null,
+      judgmentRegime: "TREND",
+      judgmentSubtype: "TREND_UP_CONTINUATION",
+      executionMetadata: execMeta,
+      executionEntrySemantic: "HIGHWAY_CORE"
+    });
+    assert.equal(assign, true);
+
+    const sizing = evaluateEquityAdaptiveSizing({
+      symbol: "BTCUSDT",
+      side: "long",
+      orderKind: "ENTRY",
+      accountEquityUsdt: DEFAULT_EQUITY,
+      availableBalanceUsdt: DEFAULT_EQUITY,
+      lastPrice: LAST_PRICE,
+      entryReferencePrice: LAST_PRICE,
+      effectiveStopPrice: STOP_PRICE,
+      appliedLeverage: APPLIED_LEVERAGE,
+      entryQualityGrade: "A",
+      existingSymbolNotionalUsdt: 0,
+      existingAccountNotionalUsdt: 0,
+      v2AuthorityEntry: true,
+      v2HardSafetyCapUsdt: 600,
+      isHighwayLineage: assign
+    });
+    assert.equal(sizing.limitingAuthority, "highway_initial_target");
+    assert.equal(sizing.preLotNotionalUsdt, 575);
+  });
+
+  it("41. [live-path] generic TREND (WEAK alignment) → provenance ineligible → assign false", () => {
+    const eligible = resolveHighwayCoreEntryProvenanceEligible({
+      initialEntryCandidate: true,
+      highwayGateAllowed: true,
+      highwayGateRejected: false,
+      nativeTrendExecutor: true,
+      promotionApplied: false,
+      promotionReason: null,
+      judgmentSubtype: "TREND_MOMENTUM_HEALTHY",
+      executionEntrySemantic: null,
+      side: "long",
+      highwayDirectional: mockWeakTrendHighwayAuth()
+    });
+    assert.equal(eligible, false);
+    const assign = resolveInitialHighwayLineageAssignment({
+      isAddOn: false,
+      finalDecisionEnter: true,
+      highwayGateRejected: false,
+      isMicroProbe: false,
+      promotionApplied: false,
+      promotionReason: null,
+      judgmentRegime: "TREND",
+      judgmentSubtype: "TREND_MOMENTUM_HEALTHY",
+      executionMetadata: { trend_provenance: "TREND_EXECUTOR_MOMENTUM" }
+    });
+    assert.equal(assign, false);
+  });
+
+  it("42. [live-path] SHOCK_REACTION promotion → provenance ineligible", () => {
+    const promo = "SHOCK_REACTION_upper_breakout_continuation_long";
+    const eligible = resolveHighwayCoreEntryProvenanceEligible({
+      initialEntryCandidate: true,
+      highwayGateAllowed: true,
+      highwayGateRejected: false,
+      nativeTrendExecutor: true,
+      promotionApplied: true,
+      promotionReason: promo,
+      judgmentSubtype: "SHOCK_REACTION_UP",
+      executionEntrySemantic: null,
+      side: "long",
+      highwayDirectional: mockStrongUpHighwayAuth()
+    });
+    assert.equal(eligible, false);
   });
 });
 

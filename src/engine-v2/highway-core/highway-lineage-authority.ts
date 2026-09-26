@@ -1,7 +1,10 @@
 /**
  * Canonical Highway branched-lifecycle lineage (sizing + ledger persistence).
- * Fail-closed: only explicit markers or qualified initial TREND native ENTER.
+ * Fail-closed: only explicit Highway Core markers (same family as addon/TP authority).
  */
+
+import type { HighwayDirectionalAuthority } from "./highway-directional-authority";
+import { HighwayTrendState } from "../../models/types";
 
 export type HighwayLineageResolveInput = Readonly<{
     isHighwayLineageExplicit?: boolean | null;
@@ -77,41 +80,22 @@ export type InitialHighwayLineageAssignInput = Readonly<{
 
 /**
  * Initial ENTRY only: assign ledger/metadata lineage for Highway branched lifecycle.
- * Excludes SHOCK_REACTION, FTS, RANGE, promoted probes, and generic promoted paths.
+ * Fail-closed unless execution carries canonical Highway markers (see explicitHighwayMarkers).
  */
 export function resolveInitialHighwayLineageAssignment(input: InitialHighwayLineageAssignInput): boolean {
     if (!input.finalDecisionEnter || input.isAddOn) return false;
     if (input.highwayGateRejected || input.isMicroProbe) return false;
 
     const execMeta = input.executionMetadata ?? undefined;
-    if (
-        resolveCanonicalHighwayLineage({
-            isHighwayLineageExplicit: execMeta?.isHighwayLineage === true,
-            entrySemantic: input.executionEntrySemantic ?? (typeof execMeta?.entrySemantic === "string" ? execMeta.entrySemantic : null),
-            v2EntryReason: typeof execMeta?.v2EntryReason === "string" ? execMeta.v2EntryReason : null,
-            promotionReason: input.promotionReason,
-            judgmentSubtype: input.judgmentSubtype
-        })
-    ) {
-        return true;
-    }
-
-    if (
-        isHighwayLineageExcluded({
-            promotionReason: input.promotionReason,
-            judgmentSubtype: input.judgmentSubtype,
-            entrySemantic: input.executionEntrySemantic ?? null
-        })
-    ) {
-        return false;
-    }
-
-    if (input.promotionApplied || input.promotionReason) return false;
-
-    const regime = String(input.judgmentRegime ?? "").toUpperCase();
-    if (regime !== "TREND") return false;
-
-    return true;
+    return resolveCanonicalHighwayLineage({
+        isHighwayLineageExplicit: execMeta?.isHighwayLineage === true,
+        entrySemantic:
+            input.executionEntrySemantic ??
+            (typeof execMeta?.entrySemantic === "string" ? execMeta.entrySemantic : null),
+        v2EntryReason: typeof execMeta?.v2EntryReason === "string" ? execMeta.v2EntryReason : null,
+        promotionReason: input.promotionReason,
+        judgmentSubtype: input.judgmentSubtype
+    });
 }
 
 export function resolveHighwayLineageFromOpenPosition(position: {
@@ -125,4 +109,61 @@ export function resolveHighwayLineageFromOpenPosition(position: {
         positionEntrySemantic: position.entrySemantic ?? null,
         positionV2EntryReason: position.v2EntryReason ?? null
     });
+}
+
+export type HighwayCoreProvenanceStampInput = Readonly<{
+    initialEntryCandidate: boolean;
+    highwayGateAllowed: boolean;
+    highwayGateRejected: boolean;
+    nativeTrendExecutor: boolean;
+    promotionApplied: boolean;
+    promotionReason: string | null;
+    judgmentSubtype: string | null;
+    executionEntrySemantic?: string | null;
+    side: "long" | "short";
+    highwayDirectional: HighwayDirectionalAuthority;
+}>;
+
+/**
+ * Production Highway Core initial ENTER: canonical detectHighwayTrend VALID + directional authority
+ * aligned with side, native TREND executor path, and Highway Core entry gate allowed (fail-closed).
+ */
+export function resolveHighwayCoreEntryProvenanceEligible(
+    input: HighwayCoreProvenanceStampInput
+): boolean {
+    if (!input.initialEntryCandidate || !input.highwayGateAllowed || input.highwayGateRejected) {
+        return false;
+    }
+    if (!input.nativeTrendExecutor || input.promotionApplied || input.promotionReason) {
+        return false;
+    }
+    if (
+        isHighwayLineageExcluded({
+            promotionReason: input.promotionReason,
+            judgmentSubtype: input.judgmentSubtype,
+            entrySemantic: input.executionEntrySemantic ?? null
+        })
+    ) {
+        return false;
+    }
+
+    const trendState = input.highwayDirectional.details.highwayTrendState;
+    if (trendState !== HighwayTrendState.VALID) {
+        return false;
+    }
+
+    if (input.side === "long") {
+        return input.highwayDirectional.strongUp === true;
+    }
+    if (input.side === "short") {
+        return input.highwayDirectional.strongDown === true;
+    }
+    return false;
+}
+
+/** Single writer: canonical execution/metadata provenance for downstream assign + sizing bridge. */
+export function stampHighwayCoreEntryProvenance(target: Record<string, unknown>): void {
+    target.isHighwayLineage = true;
+    target.entrySemantic = "HIGHWAY_CORE";
+    target.v2EntryReason = "HIGHWAY_CORE_ENTRY";
 }

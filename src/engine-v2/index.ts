@@ -67,8 +67,10 @@ import { evaluateHighwayCoreEntryGate } from "./highway-core/highway-entry-gate"
 import { resolveHighwayDirectionalAuthority } from "./highway-core/highway-directional-authority";
 import {
     resolveCanonicalHighwayLineage,
+    resolveHighwayCoreEntryProvenanceEligible,
     resolveHighwayLineageFromOpenPosition,
-    resolveInitialHighwayLineageAssignment
+    resolveInitialHighwayLineageAssignment,
+    stampHighwayCoreEntryProvenance
 } from "./highway-core/highway-lineage-authority";
 import { isSoftExitCooldownActive } from "./exit/soft-exit-hysteresis";
 import { evaluateShortReversalWatch } from "./market-judgment/short-reversal-watch";
@@ -7522,6 +7524,34 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             promotionReason = null;
             expectedMissingCondition = highwayGate.rejectReason;
             expectedNextAction = "WAIT_FOR_HIGHWAY_CORE_EDGE_AND_RR";
+        } else if (
+            !hasExistingPos &&
+            resolveHighwayCoreEntryProvenanceEligible({
+                initialEntryCandidate: true,
+                highwayGateAllowed: highwayGate.allowed,
+                highwayGateRejected: false,
+                nativeTrendExecutor: routing.executor === "TREND",
+                promotionApplied,
+                promotionReason,
+                judgmentSubtype: judgment.subtype ?? null,
+                executionEntrySemantic:
+                    typeof (execution as { entrySemantic?: string }).entrySemantic === "string"
+                        ? (execution as { entrySemantic?: string }).entrySemantic
+                        : typeof (execution.metadata as Record<string, unknown> | undefined)?.entrySemantic ===
+                            "string"
+                          ? String((execution.metadata as Record<string, unknown>).entrySemantic)
+                          : null,
+                side: v2SideAfterPromotion,
+                highwayDirectional: highwayAuth
+            })
+        ) {
+            if (!execution.metadata) {
+                execution.metadata = {};
+            }
+            stampHighwayCoreEntryProvenance(execution.metadata as Record<string, unknown>);
+            if (typeof (execution as { entrySemantic?: string }).entrySemantic !== "string") {
+                (execution as { entrySemantic?: string }).entrySemantic = "HIGHWAY_CORE";
+            }
         }
     }
 
@@ -11126,8 +11156,12 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     });
     if (assignHighwayLineageOnEnter) {
         decision.metadata.isHighwayLineage = true;
-        if (typeof decision.metadata.entrySemantic !== "string") {
-            decision.metadata.entrySemantic = "HIGHWAY_CORE";
+        const stampedEntrySemantic =
+            typeof execMetaForLineagePersist?.entrySemantic === "string"
+                ? execMetaForLineagePersist.entrySemantic
+                : null;
+        if (typeof decision.metadata.entrySemantic !== "string" && stampedEntrySemantic) {
+            decision.metadata.entrySemantic = stampedEntrySemantic;
         }
     } else if (
         !resolveCanonicalHighwayLineage({
