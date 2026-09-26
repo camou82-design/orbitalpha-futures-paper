@@ -54,6 +54,15 @@ export function isRoutineDefensivePartialReason(reason: string | null | undefine
     return r.includes("PNL_STOP") || r.includes("TRANSITION_REDUCE_ON_CONFLICT");
 }
 
+export function isPriorShockDefensiveReduce(reason: unknown): boolean {
+    const r = String(reason ?? "").toUpperCase();
+    return (
+        r.includes("SHOCK_PROTECTIVE_REDUCE") ||
+        r.includes("SHOCK_FULL_EXIT_AGAINST_POSITION") ||
+        (r.includes("SHOCK") && (r.includes("REDUCE") || r.includes("DEFENSIVE")))
+    );
+}
+
 export function isFeeEconomicsBypassReason(reason: string | null | undefined): boolean {
     const upper = String(reason ?? "").toUpperCase();
     for (const token of FEE_BYPASS_REASONS) {
@@ -324,7 +333,9 @@ export function markProtectiveReduceEpisodeFilled(
     open.lastReduceInvalidationDistancePct = input.invalidationDistancePct ?? undefined;
     open.consecutiveReduceEpisodeCount = (open.consecutiveReduceEpisodeCount ?? 0) + 1;
     open.protectivePartialReduceCount = (open.protectivePartialReduceCount ?? 0) + 1;
-    open.shockReduceState = "FILLED";
+    if (isPriorShockDefensiveReduce(input.reason)) {
+        open.shockReduceState = "FILLED";
+    }
     if (String(input.reason).toUpperCase().includes("RANGE_PARTIAL_AT_OPPOSITE_EDGE")) {
         open.rangeOppositePartialTaken = true;
     }

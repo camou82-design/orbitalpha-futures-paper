@@ -286,6 +286,7 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
         (typeof pos?.protectivePartialReduceCount === "number" && pos.protectivePartialReduceCount > 0);
 
     const priorShockDefensiveReduce =
+        pos?.shockReduceState === "FILLED" ||
         isPriorShockDefensiveReduce(pos?.lastReduceReason);
 
     let action: V2ExitPolicyResult["action"] = "HOLD";

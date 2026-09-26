@@ -26742,6 +26742,7 @@ export function buildV2StateBridge(
               : undefined,
           slProtectionSatisfied: p.slProtectionSatisfied === true,
           protectiveSlAlgoId: p.protectiveSlAlgoId,
+          shockReduceState: p.shockReduceState,
           lastReduceReason: p.lastReduceReason,
           rangeOppositePartialTaken: p.rangeOppositePartialTaken === true,
           protectivePartialReduceCount: p.protectivePartialReduceCount,

@@ -147,6 +147,8 @@ export interface EngineV2Position {
     isProtectiveStopRegistered?: boolean;
     slProtectionProvisional?: boolean;
     protectiveVisibilityGraceDeadlineMs?: number;
+    /** Shock/partial reduce lifecycle (policy-layer duplicate submit guard). */
+    shockReduceState?: "IDLE" | "REQUESTED" | "SUBMITTED" | "PARTIALLY_FILLED" | "FILLED" | "TERMINAL";
     /** Last filled defensive partial reduce reason (ledger → policy repeat guard). */
     lastReduceReason?: string;
     rangeOppositePartialTaken?: boolean;
@@ -283,6 +285,7 @@ export interface LegacyPositionAdapter {
     isProtectiveStopRegistered?: boolean;
     slProtectionProvisional?: boolean;
     protectiveVisibilityGraceDeadlineMs?: number;
+    shockReduceState?: "IDLE" | "REQUESTED" | "SUBMITTED" | "PARTIALLY_FILLED" | "FILLED" | "TERMINAL";
     lastReduceReason?: string;
     rangeOppositePartialTaken?: boolean;
     protectivePartialReduceCount?: number;
@@ -662,6 +665,7 @@ export interface V2BridgePosition {
     slProtectionSatisfied?: boolean;
     protectiveSlAlgoId?: string;
     slProtectionProvisional?: boolean;
+    shockReduceState?: "IDLE" | "REQUESTED" | "SUBMITTED" | "PARTIALLY_FILLED" | "FILLED" | "TERMINAL";
     lastReduceReason?: string;
     rangeOppositePartialTaken?: boolean;
     protectivePartialReduceCount?: number;

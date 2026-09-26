@@ -11413,6 +11413,7 @@ export function adaptV2Input(
                     isProtectiveStopRegistered: p.isProtectiveStopRegistered === true,
                     slProtectionProvisional: p.slProtectionProvisional === true,
                     protectiveVisibilityGraceDeadlineMs: p.protectiveVisibilityGraceDeadlineMs,
+                    shockReduceState: p.shockReduceState,
                     lastReduceReason: p.lastReduceReason,
                     rangeOppositePartialTaken: p.rangeOppositePartialTaken === true,
                     protectivePartialReduceCount: p.protectivePartialReduceCount,
