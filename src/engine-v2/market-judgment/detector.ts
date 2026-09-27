@@ -14,6 +14,12 @@ import { deriveTrendSideCandidate } from "../trend-side-candidate";
 import { evaluateWhipsawEvidenceBundle } from "./whipsaw-structural-evidence";
 import { applyShockReleasedTrendRegimeAuthority } from "../state/shock-crash-release-authority";
 import {
+    applyTrendRangeRegimeFinalAuthority,
+    resolveFastTrendStructuralEvidence,
+    resolveTrendRangeScoreAuthority,
+    type TrendRangeScoreAuthority
+} from "./trend-range-score-authority";
+import {
     getClosedCandlesForStructuralStop,
     resolveFastTrendShiftStructuralStop
 } from "../risk-sizing/fast-trend-shift-structural-stop";
@@ -433,36 +439,20 @@ function evaluateFastTrendShift(args: {
     if (!candles || candles.length < 10) return res;
 
     const recent = candles.slice(-5);
-    const prev = candles.slice(-10, -5);
     const lastCandle = recent[recent.length - 1];
-
-    const recentHigh = Math.max(...recent.map(c => c.high));
-    const prevHigh = Math.max(...prev.map(c => c.high));
-    const recentLow = Math.min(...recent.map(c => c.low));
-    const prevLow = Math.min(...prev.map(c => c.low));
-
+    const structural = resolveFastTrendStructuralEvidence({ candles, snapshot: sn });
     const boxMid = (sn.boxHigh && sn.boxLow) ? (sn.boxHigh + sn.boxLow) / 2 : null;
     const e20Slope = Number(sn.ema20Slope ?? 0);
     const volExp = Number(sn.volumeExpansion ?? 1);
 
-    res.higher_low_detected = recentLow > prevLow;
-    res.higher_high_detected = recentHigh > prevHigh;
-    res.lower_high_detected = recentHigh < prevHigh;
-    res.lower_low_detected = recentLow < prevLow;
-
-    if (boxMid) {
-        res.box_mid_reclaimed = lastPrice > boxMid && candles[candles.length - 2].close <= boxMid;
-        res.box_mid_lost = lastPrice < boxMid && candles[candles.length - 2].close >= boxMid;
-    }
-
-    if (sn.boxHigh && lastPrice >= sn.boxHigh * 0.998) {
-        const recentMin = Math.min(...recent.map(c => c.low));
-        if (recentMin >= sn.boxHigh * 0.998) res.box_upper_breakout_hold = true;
-    }
-    if (sn.boxLow && lastPrice <= sn.boxLow * 1.002) {
-        const recentMax = Math.max(...recent.map(c => c.high));
-        if (recentMax <= sn.boxLow * 1.002) res.box_lower_breakdown_hold = true;
-    }
+    res.higher_low_detected = structural.higher_low;
+    res.higher_high_detected = structural.higher_high;
+    res.lower_high_detected = structural.lower_high;
+    res.lower_low_detected = structural.lower_low;
+    res.box_mid_reclaimed = structural.box_mid_reclaimed;
+    res.box_mid_lost = structural.box_mid_lost;
+    res.box_upper_breakout_hold = structural.upper_breakout_hold;
+    res.box_lower_breakdown_hold = structural.lower_breakdown_hold;
 
     res.ema_slope_shift = Math.abs(e20Slope) > 0.0001;
     res.volume_expansion = volExp >= 1.5;
@@ -1290,8 +1280,9 @@ function calculateMacroBias(htfCandles: Record<string, Candle[]>, symbol: string
 export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
     const { snapshot: sn } = input;
 
-    const rangeScore = sn.rangeConfidence || 0;
-    const trendScore = Math.abs(sn.emaGap || 0) * 1000; // Normalized
+    let rangeScore = sn.rangeConfidence || 0;
+    let trendScore = Math.abs(sn.emaGap || 0) * 1000; // Normalized (legacy ema component)
+    let trendRangeScoreAuthority: TrendRangeScoreAuthority | null = null;
     const boxCohesionCollapse = (sn.boxCohesion01 || 0) < 0.3;
     const mixedBreakoutState = (sn.breakoutFailureRate || 0) > 0.4 && (sn.breakoutFailureRate || 0) < 0.7;
     const emaExpansionWeak = Math.abs(sn.emaGap || 0) > 0.0003 && (sn.trendWeaknessScore || 0) > 0.6;
@@ -1695,6 +1686,39 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
         fastShift
     });
 
+    const ftsProbeAllowed = earlyLongProbe.allowed || earlyShortProbe.allowed;
+    const structuralForScores = resolveFastTrendStructuralEvidence({
+        candles: input.candles ?? sn.candles ?? [],
+        snapshot: sn
+    });
+    trendRangeScoreAuthority = resolveTrendRangeScoreAuthority({
+        input,
+        regimeBefore: regime_final,
+        structural: structuralForScores,
+        htfEntryPolicy,
+        fastTrendShiftActive: fastShift.active,
+        fastTrendDirection: fastShift.direction,
+        ftsProbeAllowed
+    });
+    trendScore = trendRangeScoreAuthority.final_trend_score;
+    rangeScore = trendRangeScoreAuthority.final_range_score;
+
+    const trendRangeRegime = applyTrendRangeRegimeFinalAuthority({
+        regimeFinal: regime_final,
+        shockPhase,
+        crashState: String(input.state.crashState ?? "NONE"),
+        directionalShockState: String(input.state.directionalShockState ?? "NONE"),
+        trendPhase,
+        htfEntryPolicy,
+        scoreAuthority: trendRangeScoreAuthority,
+        fastTrendShiftActive: fastShift.active,
+        fastTrendDirection: fastShift.direction,
+        ftsProbeAllowed
+    });
+    if (trendRangeRegime.regimeFinal != null) {
+        regime_final = trendRangeRegime.regimeFinal;
+    }
+
     let finalSubtype: EngineV2MarketSubtype = subtypeDecision.subtype;
     let finalSubtypeReason = subtypeDecision.subtypeReason;
 
@@ -1966,11 +1990,12 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
                 hits: earlyLongProbe.allowed ? earlyLongProbe.hits : earlyShortProbe.hits,
                 counter_trend_risk: counterTrendRisk
             },
+            trendRangeScoreAuthority: trendRangeScoreAuthority ?? undefined,
             fastTrendShift: {
                 active: fastShift.active,
                 direction: fastShift.direction,
                 candidate: fastShift.candidate,
-                allowed: earlyLongProbe.allowed || earlyShortProbe.allowed,
+                allowed: ftsProbeAllowed,
                 side: earlyLongProbe.allowed ? "long" : (earlyShortProbe.allowed ? "short" : "none"),
                 reason: fastShift.reason,
                 block_reason: earlyLongProbe.allowed ? "" : (earlyShortProbe.allowed ? "" : (earlyLongProbe.block_reason || earlyShortProbe.block_reason)),

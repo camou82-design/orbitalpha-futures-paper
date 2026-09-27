@@ -1028,6 +1028,7 @@ export interface MarketJudgmentOutput {
             atr_buffer_price?: number | null;
             stop_distance_pct?: number | null;
         };
+        trendRangeScoreAuthority?: import("../market-judgment/trend-range-score-authority").TrendRangeScoreAuthority;
     };
     metadata?: Record<string, any>;
 }

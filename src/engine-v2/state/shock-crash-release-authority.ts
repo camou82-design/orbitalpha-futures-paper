@@ -5,6 +5,7 @@ import type { EngineV2Input, EngineV2Regime } from "../types";
 export type RegimeFinalAuthority = Extract<EngineV2Regime, "TREND" | "RANGE" | "NO_TRADE">;
 import { evaluateCrashRisk, evaluatePumpRisk, type CrashState, type PumpState } from "../../engine/crash-detector";
 import { isHtfPolicyCompatibleWithCandidateSide } from "../market-judgment/whipsaw-aged-soft-downgrade";
+import { resolveFastTrendStructuralEvidence } from "../market-judgment/trend-range-score-authority";
 
 export type ShockReleaseAuthorityProof = Readonly<{
     previous_shock_state: string;
@@ -121,41 +122,39 @@ export function deriveTrendRecoveryStructuralMetrics(input: EngineV2Input): Tren
             ? sn.canonicalTrendScore
             : Math.abs(emaGap) * 1000;
 
-    let higherLow = false;
-    let higherHigh = false;
-    let upperBreakoutHold = false;
-
-    if (candles.length >= 10) {
-        const recent = candles.slice(-5);
-        const prev = candles.slice(-10, -5);
-        const recentHigh = Math.max(...recent.map((c) => c.high));
-        const prevHigh = Math.max(...prev.map((c) => c.high));
-        const recentLow = Math.min(...recent.map((c) => c.low));
-        const prevLow = Math.min(...prev.map((c) => c.low));
-        higherLow = recentLow > prevLow;
-        higherHigh = recentHigh > prevHigh;
-        const lastPrice = Number(sn.lastPrice ?? candles[candles.length - 1]?.close ?? 0);
-        const boxHigh = Number(sn.boxHigh ?? 0);
-        if (boxHigh > 0 && lastPrice >= boxHigh * 0.998) {
-            const recentMin = Math.min(...recent.map((c) => c.low));
-            upperBreakoutHold = recentMin >= boxHigh * 0.998;
-        }
-    }
-
-    upperBreakoutHold =
-        upperBreakoutHold ||
-        (sn as { box_upper_breakout_hold?: boolean }).box_upper_breakout_hold === true ||
-        (sn as { upper_breakout_hold?: boolean }).upper_breakout_hold === true;
+    const structural =
+        candles.length >= 10
+            ? resolveFastTrendStructuralEvidence({ candles, snapshot: sn })
+            : {
+                  higher_low: false,
+                  higher_high: false,
+                  lower_high: false,
+                  lower_low: false,
+                  box_mid_reclaimed: false,
+                  box_mid_lost: false,
+                  upper_breakout_hold: false,
+                  lower_breakdown_hold: false
+              };
+    const higherLow = structural.higher_low;
+    const higherHigh = structural.higher_high;
+    let upperBreakoutHold = structural.upper_breakout_hold;
 
     const htfPolicy = resolveHtfPolicyLabel(input);
 
+    const structureTrendScore = Math.min(
+        1,
+        (higherLow ? 0.18 : 0) +
+            (higherHigh ? 0.18 : 0) +
+            (upperBreakoutHold ? 0.32 : 0) +
+            (Number(sn.ema20Slope ?? 0) > 0.0001 ? 0.12 : 0)
+    );
+    const effectiveTrendScore = Math.max(canonicalTrendScore, Math.abs(emaGap) * 1000, structureTrendScore);
     const trendDominant =
-        Number.isFinite(canonicalTrendScore) &&
-        canonicalTrendScore >= 0.55 &&
-        Number.isFinite(emaGap) &&
-        emaGap > 0 &&
+        Number.isFinite(effectiveTrendScore) &&
+        effectiveTrendScore >= 0.55 &&
         Number.isFinite(trendWeakness) &&
-        trendWeakness < 0.55;
+        trendWeakness < 0.55 &&
+        (emaGap > 0 || (structural.higher_low && structural.higher_high && upperBreakoutHold));
 
     const structuralRecovery =
         (higherLow || higherHigh) &&
@@ -163,7 +162,7 @@ export function deriveTrendRecoveryStructuralMetrics(input: EngineV2Input): Tren
         isHtfPolicyCompatibleWithCandidateSide(htfPolicy, "long");
 
     return {
-        trendScore: canonicalTrendScore,
+        trendScore: effectiveTrendScore,
         emaGap,
         higherLow,
         higherHigh,

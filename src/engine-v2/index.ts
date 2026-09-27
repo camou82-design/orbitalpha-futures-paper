@@ -835,6 +835,28 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             final_router_executor: routing.executor
         }));
     }
+    const trendRangeScoreAuthority = (judgment.diagnostics as { trendRangeScoreAuthority?: Record<string, unknown> } | undefined)
+        ?.trendRangeScoreAuthority;
+    if (trendRangeScoreAuthority) {
+        console.info(JSON.stringify({
+            event: "V2_TREND_RANGE_SCORE_AUTHORITY_PROOF",
+            symbol: String(input.symbol),
+            ema_gap_component: trendRangeScoreAuthority.ema_gap_component,
+            structure_component: trendRangeScoreAuthority.structure_component,
+            htf_component: trendRangeScoreAuthority.htf_component,
+            higher_low: trendRangeScoreAuthority.higher_low,
+            higher_high: trendRangeScoreAuthority.higher_high,
+            upper_breakout_hold: trendRangeScoreAuthority.upper_breakout_hold,
+            lower_breakdown_hold: trendRangeScoreAuthority.lower_breakdown_hold,
+            trend_score_components: trendRangeScoreAuthority.trend_score_components,
+            range_score_components: trendRangeScoreAuthority.range_score_components,
+            final_trend_score: trendRangeScoreAuthority.final_trend_score,
+            final_range_score: trendRangeScoreAuthority.final_range_score,
+            regime_before: trendRangeScoreAuthority.regime_before,
+            regime_final: judgment.regime_final,
+            router_executor: routing.executor
+        }));
+    }
     console.info(JSON.stringify({
         event: "V2_STATE_AUTHORITY_PROOF",
         symbol: String(input.symbol),
