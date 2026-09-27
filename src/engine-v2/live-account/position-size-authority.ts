@@ -4,12 +4,16 @@ import type { PaperOpenPositionRecord } from "../../models/types";
 export type PaperPositionSizeUnit = "LEGACY_MARGIN" | "V2_NOTIONAL" | "V2_UNIT_UNVERIFIED" | "UNKNOWN";
 
 export function resolveOpenPositionSizeUnit(open: PaperOpenPositionRecord): PaperPositionSizeUnit {
-    if (typeof open.notionalUsd === "number" && Number.isFinite(open.notionalUsd) && open.notionalUsd > 0) {
+    // Persisted notionalUsd is authoritative NOTIONAL exposure, not sizeUsd unit provenance.
+    if (isV2AuthorityRow(open)) {
+        if (typeof open.notionalUsd === "number" && Number.isFinite(open.notionalUsd) && open.notionalUsd > 0) {
+            return "V2_NOTIONAL";
+        }
+        if (open.isV2Authority === true) {
+            return "V2_UNIT_UNVERIFIED";
+        }
         return "V2_NOTIONAL";
     }
-    if (open.isV2Authority === true) return "V2_UNIT_UNVERIFIED";
-    const authSrc = String(open.authoritySourceAtEntry ?? open.authority ?? "").trim().toLowerCase();
-    if (authSrc === "v2") return "V2_UNIT_UNVERIFIED";
 
     const strategy = String(open.strategyVersion ?? "").toLowerCase();
     if (strategy.includes("v2")) return "UNKNOWN";
@@ -84,9 +88,10 @@ export type PaperNotionalAuthority = {
 
 export function resolveOpenNotionalAuthority(open: PaperOpenPositionRecord, okxActualNotionalUsd?: number | null): PaperNotionalAuthority {
     if (typeof open.notionalUsd === "number" && Number.isFinite(open.notionalUsd) && open.notionalUsd > 0) {
+        const sizeUnit = resolveOpenPositionSizeUnit(open);
         return {
             valueUsd: open.notionalUsd,
-            unit: "V2_NOTIONAL",
+            unit: sizeUnit,
             source: "PERSISTED_NOTIONAL",
             authoritative: true
         };
