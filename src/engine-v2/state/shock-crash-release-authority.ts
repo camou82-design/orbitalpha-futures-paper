@@ -1,5 +1,8 @@
 import type { Candle } from "../../models/types";
-import type { EngineV2Input } from "../types";
+import type { EngineV2Input, EngineV2Regime } from "../types";
+
+/** regime_final authority surface (excludes TRANSITION). */
+export type RegimeFinalAuthority = Extract<EngineV2Regime, "TREND" | "RANGE" | "NO_TRADE">;
 import { evaluateCrashRisk, evaluatePumpRisk, type CrashState, type PumpState } from "../../engine/crash-detector";
 import { isHtfPolicyCompatibleWithCandidateSide } from "../market-judgment/whipsaw-aged-soft-downgrade";
 
@@ -286,10 +289,7 @@ export function evaluateStaleDownShockCrashReleaseAuthority(args: Readonly<{
     const neutralPersistence =
         rawDirection === "NONE" && neutralCount >= 2 && elapsedActive && activeDirection === "DOWN";
 
-    const retestConfirmed =
-        input.snapshot?.transitionPhase === "RETEST_CONFIRMED" ||
-        (input.snapshot as { retest_confirmed?: boolean }).retest_confirmed === true ||
-        (input.snapshot as { retestConfirmed?: boolean }).retestConfirmed === true;
+    const retestConfirmed = input.snapshot?.retestConfirmed === true;
 
     const persistenceSatisfied =
         earlyDecayEligible ||
@@ -335,28 +335,28 @@ export function evaluateStaleDownShockCrashReleaseAuthority(args: Readonly<{
 }
 
 export function applyShockReleasedTrendRegimeAuthority(args: Readonly<{
-    regimeFinal: string;
+    regimeFinal: EngineV2Regime;
     shockPhase: string;
     crashState: string;
     directionalShockState: string;
     snapshot: EngineV2Input["snapshot"];
     trendPhase: string;
-}>): { regimeFinal: string; reason: string | null } {
+}>): Readonly<{ regimeFinal: RegimeFinalAuthority | null; reason: string | null }> {
     const { regimeFinal, shockPhase, crashState, directionalShockState, snapshot, trendPhase } = args;
-    if (regimeFinal === "NO_TRADE") return { regimeFinal, reason: null };
+    if (regimeFinal === "NO_TRADE") return { regimeFinal: null, reason: null };
 
     const shockDown =
         shockPhase === "DOWN_SHOCK" ||
         String(directionalShockState ?? "NONE").toUpperCase() === "DOWN";
     const crashOrd = crashOrder(crashState);
     if (shockDown || crashOrd >= CRASH_HARD_ORDER.CRASH_EXIT) {
-        return { regimeFinal, reason: null };
+        return { regimeFinal: null, reason: null };
     }
 
     const inputStub = { snapshot, candles: snapshot?.candles ?? [] } as EngineV2Input;
     const metrics = deriveTrendRecoveryStructuralMetrics(inputStub);
     if (!metrics.trendDominant || !metrics.structuralRecovery) {
-        return { regimeFinal, reason: null };
+        return { regimeFinal: null, reason: null };
     }
 
     const tp = String(trendPhase ?? "").toUpperCase();
@@ -369,7 +369,7 @@ export function applyShockReleasedTrendRegimeAuthority(args: Readonly<{
     if (trendStructureOk && (regimeFinal === "RANGE" || regimeFinal === "TRANSITION")) {
         return { regimeFinal: "TREND", reason: "SHOCK_RELEASE_TREND_RECOVERY_AUTHORITY" };
     }
-    return { regimeFinal, reason: null };
+    return { regimeFinal: null, reason: null };
 }
 
 export function buildShockReleaseAuthorityProof(args: Readonly<{

@@ -1362,8 +1362,8 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
         snapshot: sn,
         trendPhase
     });
-    if (shockReleasedRegime.reason) {
-        regime_final = shockReleasedRegime.regimeFinal as MarketJudgmentOutput["regime_final"];
+    if (shockReleasedRegime.regimeFinal != null) {
+        regime_final = shockReleasedRegime.regimeFinal;
     }
 
     console.info(JSON.stringify({
