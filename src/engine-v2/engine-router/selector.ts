@@ -4,7 +4,7 @@ export function routeToExecutor(
     judgment: MarketJudgmentOutput,
     confidence: RegimeConfidenceOutput
 ): RouterOutput {
-    const { regime } = judgment;
+    const regime = judgment.regime_final ?? judgment.regime;
     const { level } = confidence;
 
     // Rule: If confidence is LOW, Trend/Range are downgraded to TRANSITION

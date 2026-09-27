@@ -12,6 +12,7 @@ import {
 } from "./whipsaw-aged-soft-downgrade";
 import { deriveTrendSideCandidate } from "../trend-side-candidate";
 import { evaluateWhipsawEvidenceBundle } from "./whipsaw-structural-evidence";
+import { applyShockReleasedTrendRegimeAuthority } from "../state/shock-crash-release-authority";
 import {
     getClosedCandlesForStructuralStop,
     resolveFastTrendShiftStructuralStop
@@ -1351,6 +1352,18 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
     } else if (regime === "NO_TRADE") {
         regime_final = "NO_TRADE";
         no_trade_reason = "CANONICAL_NO_TRADE";
+    }
+
+    const shockReleasedRegime = applyShockReleasedTrendRegimeAuthority({
+        regimeFinal: regime_final,
+        shockPhase,
+        crashState: String(input.state.crashState ?? "NONE"),
+        directionalShockState: String(input.state.directionalShockState ?? "NONE"),
+        snapshot: sn,
+        trendPhase
+    });
+    if (shockReleasedRegime.reason) {
+        regime_final = shockReleasedRegime.regimeFinal as MarketJudgmentOutput["regime_final"];
     }
 
     console.info(JSON.stringify({

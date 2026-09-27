@@ -826,6 +826,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     // Tier 3: Engine Router
     const routing = routeToExecutor(judgment, confidence);
+    if (v2State.shockReleaseAuthorityProof) {
+        console.info(JSON.stringify({
+            event: "V2_SHOCK_RELEASE_AUTHORITY_PROOF",
+            symbol: String(input.symbol),
+            ...v2State.shockReleaseAuthorityProof,
+            final_regime: judgment.regime_final,
+            final_router_executor: routing.executor
+        }));
+    }
     console.info(JSON.stringify({
         event: "V2_STATE_AUTHORITY_PROOF",
         symbol: String(input.symbol),

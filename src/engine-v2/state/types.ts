@@ -1,4 +1,5 @@
 import type { EngineV2Input, EngineV2Position, EngineV2Side } from "../types";
+import type { ShockReleaseAuthorityProof } from "./shock-crash-release-authority";
 
 export type V2StateAuthoritySource = "v2_state_authority_from_bridge";
 
@@ -49,6 +50,7 @@ export type V2StateAuthority = Readonly<{
     rawShockMovePct?: number;
     requiredShockMovePct?: number;
     shockEmergencyBypass?: boolean;
+    shockReleaseAuthorityProof?: ShockReleaseAuthorityProof | null;
     crashState: string;
     pumpState: string;
     longAllow: boolean;

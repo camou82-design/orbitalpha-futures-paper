@@ -2,6 +2,12 @@ import type { EngineV2Input, EngineV2Position, EngineV2Side } from "../types";
 import type { Candle } from "../../models/types";
 import type { V2StateAuthority } from "./types";
 import { buildSymbolPositionAuthorityProof } from "../position/manual-augment-authority";
+import {
+    buildShockReleaseAuthorityProof,
+    evaluateLiveMarketDirectionalShock,
+    evaluateStaleDownShockCrashReleaseAuthority,
+    type ShockReleaseAuthorityProof
+} from "./shock-crash-release-authority";
 
 const DEFAULT_LIVE_MAX_ORDER_NOTIONAL_USDT = 100;
 
@@ -303,8 +309,10 @@ export function deriveV2StateAuthority(input: EngineV2Input): V2StateAuthority {
     const v2InputReady = marketSnapshotReady && positionStateReady;
     const killSwitch = input.state.killSwitch === true || input.state.killSwitchActive === true;
     const reconcileSafeMode = input.state.reconcileSafeMode === true || input.state.reconcileSafeModeActive === true;
-    const crashState = String(input.state.crashState ?? "NONE").toUpperCase();
+    const bridgeCrashState = String(input.state.crashState ?? "NONE").toUpperCase();
     const pumpState = String(input.state.pumpState ?? input.state.pump_state ?? "NONE").toUpperCase();
+    let shockReleaseAuthorityProof: ShockReleaseAuthorityProof | null = null;
+    let authoritativeCrashState = bridgeCrashState;
     return {
         symbol,
         now: input.now,
@@ -362,7 +370,17 @@ export function deriveV2StateAuthority(input: EngineV2Input): V2StateAuthority {
             longAllow: boolean;
             shortAllow: boolean;
         } => {
-            const raw = (input.state.directionalShockState ?? "NONE") as "UP" | "DOWN" | "NONE" | "UNKNOWN";
+            let effectiveCrashState = bridgeCrashState;
+            const bridgeShock = (input.state.directionalShockState ?? "NONE") as "UP" | "DOWN" | "NONE" | "UNKNOWN";
+            const explicitRaw = (input.state as { rawDirectionalShockState?: string }).rawDirectionalShockState;
+            const liveRawShock = evaluateLiveMarketDirectionalShock(input);
+            const raw = (
+                explicitRaw === "UP" || explicitRaw === "DOWN" || explicitRaw === "NONE"
+                    ? explicitRaw
+                    : liveRawShock !== "NONE"
+                      ? liveRawShock
+                      : bridgeShock
+            ) as "UP" | "DOWN" | "NONE" | "UNKNOWN";
 
             // Get symbol-specific state store or initialize
             const sym = String(symbol);
@@ -580,8 +598,61 @@ export function deriveV2StateAuthority(input: EngineV2Input): V2StateAuthority {
                 ts: nowMs
             }));
 
+            const previousShockForRelease = st.activeDirection;
+            const previousCrashForRelease = effectiveCrashState;
+
+            const earlyDecayForRelease =
+                st.activeDirection === "DOWN"
+                    ? evaluateStructuralReclaimEarlyDecay({
+                          activeDirection: "DOWN",
+                          candles,
+                          snapshot: input.snapshot
+                      })
+                    : { eligible: false, reason: "NO_ACTIVE_DOWN", structuralReclaimed: false };
+
+            const releaseEval = evaluateStaleDownShockCrashReleaseAuthority({
+                input,
+                previousShockState: String(previousShockForRelease),
+                previousCrashState: previousCrashForRelease,
+                activeDirection: st.activeDirection,
+                rawDirection: st.rawDirection,
+                neutralCount: st.neutralCount,
+                activatedAt: st.activatedAt,
+                emergencyBypass: st.emergencyBypass,
+                nowMs,
+                earlyDecayEligible: earlyDecayForRelease.eligible,
+                earlyDecayReason: earlyDecayForRelease.reason
+            });
+
+            if (releaseEval.hardRearm) {
+                if (releaseEval.finalShockState === "DOWN" && st.activeDirection !== "DOWN") {
+                    st.activeDirection = "DOWN";
+                    st.activatedAt = nowMs;
+                    st.lastChangedAt = nowMs;
+                    st.lastEarlyDecayReclaim = null;
+                }
+                effectiveCrashState = String(releaseEval.finalCrashState).toUpperCase();
+            } else if (releaseEval.releaseEligible) {
+                st.activeDirection = "NONE";
+                st.candidateDirection = "NONE";
+                st.candidateCount = 0;
+                st.neutralCount = 0;
+                st.candidateStartedAt = null;
+                st.activatedAt = null;
+                st.lastChangedAt = nowMs;
+                effectiveCrashState = String(releaseEval.finalCrashState).toUpperCase();
+            }
+
+            shockReleaseAuthorityProof = buildShockReleaseAuthorityProof({
+                previousShockState: String(previousShockForRelease),
+                previousCrashState: previousCrashForRelease,
+                release: releaseEval,
+                finalShockState: String(st.activeDirection),
+                finalCrashState: effectiveCrashState
+            });
+
             const stabilizedShock = st.activeDirection;
-            const hardCrashBlocked = crashState === "CRASH_EXIT" || crashState === "CRASH_LOCK";
+            const hardCrashBlocked = effectiveCrashState === "CRASH_EXIT" || effectiveCrashState === "CRASH_LOCK";
             const hardPumpBlocked = pumpState === "PUMP_EXIT" || pumpState === "PUMP_LOCK";
             const dailyLossBlocked = input.state.dailyLossGuardTriggered === true;
             const serverControlBlocked =
@@ -612,14 +683,23 @@ export function deriveV2StateAuthority(input: EngineV2Input): V2StateAuthority {
                 } else if (stabilizedShock === "DOWN") {
                     derivedLongAllow = false;
                 } else {
-                    if (input.state.longAllow === false) {
+                    const staleBridgeCrashCleared =
+                        (bridgeCrashState === "CRASH_EXIT" || bridgeCrashState === "CRASH_LOCK") &&
+                        effectiveCrashState !== "CRASH_EXIT" &&
+                        effectiveCrashState !== "CRASH_LOCK";
+                    const staleBridgeShockCleared =
+                        (input.state.directionalShockState === "DOWN" || input.state.directionalShockState === "UP") &&
+                        stabilizedShock === "NONE";
+                    if (input.state.longAllow === false && !(staleBridgeCrashCleared || staleBridgeShockCleared)) {
                         derivedLongAllow = false;
                     }
-                    if (input.state.shortAllow === false) {
+                    if (input.state.shortAllow === false && !(staleBridgeCrashCleared || staleBridgeShockCleared)) {
                         derivedShortAllow = false;
                     }
                 }
             }
+
+            authoritativeCrashState = effectiveCrashState;
 
             return {
                 directionalShockState: st.activeDirection,
@@ -632,8 +712,9 @@ export function deriveV2StateAuthority(input: EngineV2Input): V2StateAuthority {
                 shortAllow: derivedShortAllow
             };
         })(),
-        crashState,
+        crashState: authoritativeCrashState,
         pumpState,
+        shockReleaseAuthorityProof,
         accountEquityKrw: Number.isFinite(input.state.accountEquityKrw) ? Number(input.state.accountEquityKrw) : 500_000,
         maxUsableMarginKrw: Number.isFinite(input.state.maxUsableMarginKrw) ? Number(input.state.maxUsableMarginKrw) : 420_000,
         exposureNotionalCapKrw: Number.isFinite(input.state.exposureNotionalCapKrw) ? Number(input.state.exposureNotionalCapKrw) : 2_000_000,
