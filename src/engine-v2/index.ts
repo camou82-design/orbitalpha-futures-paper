@@ -11,7 +11,7 @@ import {
     LegacyResultAdapter,
     V2CommittedRiskPlan
 } from "./types";
-import { deriveTrendSideCandidate } from "./trend-side-candidate";
+import { deriveTrendSideCandidate, resolveTrendExecutionCandidateDirection } from "./trend-side-candidate";
 import { MarketSymbol, classifyRangeZone, rangeZoneLowerExtreme, rangeZoneUpperExtreme } from "../models/types";
 import { evaluateBtcShortMacroBullGate, evaluateEthShortLocationRrGate } from "./market-judgment/short-authority-gates";
 import { evaluateSameSideLossReentryGate } from "./state/loss-reentry-gate";
@@ -82,6 +82,14 @@ import {
 } from "./market-judgment/eth-fts-lower-short-stale-release";
 import { evaluateEthDirectionalAuthorityMismatch } from "./market-judgment/eth-directional-authority-reconciler";
 import { resolveFinalRegimeExecutionAuthority } from "./execution/entry-final-regime-authority";
+import {
+    buildHighway3LayerAuthorityProof,
+    resolveExecutionContextAuthority
+} from "./execution/execution-context-authority";
+import {
+    resolveHighwayLifecycleManagementAuthority,
+    resolveHighwayProtectedPyramidAddonCount
+} from "./highway-core/highway-lifecycle-authority";
 
 // Tier 5.6: Mandatory Risk Plan Audit (STOP_PRICE_MISSING Hard Block)
 export function ensurePromotedEntryRiskPlan(
@@ -2059,7 +2067,12 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const allowNewShort = Boolean((riskSizing.diagnostics as Record<string, unknown> | undefined)?.allow_new_short ?? v2State.shortAllow);
     const riskLongAllow = v2State.longAllow;
     const riskShortAllow = v2State.shortAllow;
-    const trendSideCandidate: EngineV2Side = deriveTrendSideCandidate(shock, emaGap);
+    const trendCandidateAuthority = resolveTrendExecutionCandidateDirection({
+        directionalShockState: shock,
+        emaGap,
+        canonicalRegime: judgment.diagnostics?.regimeAuthority?.canonicalRegime ?? null
+    });
+    const trendSideCandidate: EngineV2Side = trendCandidateAuthority.candidateSide;
     if (!execution.metadata) {
         execution.metadata = {};
     }
@@ -11378,6 +11391,65 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
         return decision.signal;
     })();
+
+    const regimeAuthorityJudgment = judgment.diagnostics?.regimeAuthority;
+    const phaseAuthorityJudgment = judgment.diagnostics?.phaseAuthority;
+    if (regimeAuthorityJudgment && phaseAuthorityJudgment) {
+        const lifecyclePositionForProof =
+            v2State.currentPositions.find((p) => p.symbol === input.symbol) ?? null;
+        const highwayLifecycleProof = resolveHighwayLifecycleManagementAuthority({
+            position: lifecyclePositionForProof,
+            isAddOn: !isInitialEntry && lifecyclePositionForProof != null
+        });
+        const pnlPctLifecycle = Number(lifecyclePositionForProof?.pnlPct ?? 0);
+        const protectedPyramidCount = resolveHighwayProtectedPyramidAddonCount(lifecyclePositionForProof);
+        const whipsawHard = judgment.diagnostics?.whipsaw?.active === true;
+        const executionContextAuthority = resolveExecutionContextAuthority({
+            regime: regimeAuthorityJudgment,
+            phase: phaseAuthorityJudgment,
+            finalDecision: decision.decision,
+            finalSide: decision.side,
+            rawCandidateSide: trendSideCandidate,
+            highwayGateRejected,
+            highwayGateAllowed: decision.decision === "ENTER" && !highwayGateRejected,
+            qualityScore,
+            expectedNextAction,
+            whipsawActive: whipsawHard,
+            crashState: String(v2State.crashState ?? "NONE")
+        });
+        const highwayLineageForProof = resolveCanonicalHighwayLineage({
+            isHighwayLineageExplicit: decision.metadata?.isHighwayLineage === true,
+            entrySemantic:
+                typeof decision.metadata?.entrySemantic === "string" ? decision.metadata.entrySemantic : null,
+            promotionReason,
+            judgmentSubtype: judgment.subtype ?? null
+        });
+        console.info(
+            JSON.stringify({
+                event: "V2_HIGHWAY_3LAYER_AUTHORITY_PROOF",
+                ...buildHighway3LayerAuthorityProof({
+                    symbol: String(input.symbol),
+                    regime: regimeAuthorityJudgment,
+                    phase: phaseAuthorityJudgment,
+                    execution: executionContextAuthority,
+                    crashState: String(v2State.crashState ?? "NONE"),
+                    isHighwayLineage: highwayLineageForProof,
+                    highwayLifecycleStage: highwayLifecycleProof.active ? highwayLifecycleProof.stage : null,
+                    defensiveAuthorityActive: pnlPctLifecycle <= 0 && highwayLifecycleProof.active,
+                    pyramidAuthorityActive:
+                        pnlPctLifecycle > 0 && protectedPyramidCount === 0 && highwayLifecycleProof.active,
+                    trendCandidateDirectionSource: trendCandidateAuthority.trendCandidateDirectionSource,
+                    emaGap,
+                    candidateSideBeforeRegimeAuthority: String(
+                        trendCandidateAuthority.candidateSideBeforeRegimeAuthority
+                    ),
+                    candidateSideAfterRegimeAuthority: String(
+                        trendCandidateAuthority.candidateSideAfterRegimeAuthority
+                    )
+                })
+            })
+        );
+    }
 
     console.info(JSON.stringify({
         event: "V2_ENTRY_EXECUTION_BRIDGE_PROOF",

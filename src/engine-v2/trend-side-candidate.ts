@@ -1,4 +1,5 @@
 import type { EngineV2Side } from "./types";
+import type { CanonicalRegimeDirection } from "./state/regime-authority";
 
 /**
  * Single source of truth for authoritative trendSideCandidate.
@@ -25,4 +26,41 @@ export function deriveTrendSideCandidateAsEngineSide(
     emaGap: number
 ): EngineV2Side {
     return deriveTrendSideCandidate(directionalShockState, emaGap);
+}
+
+export type TrendCandidateDirectionSource = "REGIME_DIRECTION_TREND_UP" | "REGIME_DIRECTION_TREND_DOWN" | "EMA_GAP_FALLBACK";
+
+export function resolveTrendExecutionCandidateDirection(args: Readonly<{
+    directionalShockState: string | null | undefined;
+    emaGap: number;
+    canonicalRegime: CanonicalRegimeDirection | null | undefined;
+}>): Readonly<{
+    candidateSide: "long" | "short" | "none";
+    candidateSideBeforeRegimeAuthority: "long" | "short" | "none";
+    candidateSideAfterRegimeAuthority: "long" | "short" | "none";
+    trendCandidateDirectionSource: TrendCandidateDirectionSource;
+}> {
+    const emaFallback = deriveTrendSideCandidate(args.directionalShockState, args.emaGap);
+    if (args.canonicalRegime === "TREND_UP") {
+        return {
+            candidateSideBeforeRegimeAuthority: emaFallback,
+            candidateSideAfterRegimeAuthority: "long",
+            candidateSide: "long",
+            trendCandidateDirectionSource: "REGIME_DIRECTION_TREND_UP"
+        };
+    }
+    if (args.canonicalRegime === "TREND_DOWN") {
+        return {
+            candidateSideBeforeRegimeAuthority: emaFallback,
+            candidateSideAfterRegimeAuthority: "short",
+            candidateSide: "short",
+            trendCandidateDirectionSource: "REGIME_DIRECTION_TREND_DOWN"
+        };
+    }
+    return {
+        candidateSideBeforeRegimeAuthority: emaFallback,
+        candidateSideAfterRegimeAuthority: emaFallback,
+        candidateSide: emaFallback,
+        trendCandidateDirectionSource: "EMA_GAP_FALLBACK"
+    };
 }

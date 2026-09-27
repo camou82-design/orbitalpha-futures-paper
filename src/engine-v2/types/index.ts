@@ -1029,6 +1029,8 @@ export interface MarketJudgmentOutput {
             stop_distance_pct?: number | null;
         };
         trendRangeScoreAuthority?: import("../market-judgment/trend-range-score-authority").TrendRangeScoreAuthority;
+        regimeAuthority?: import("../state/regime-authority").RegimeAuthorityResult;
+        phaseAuthority?: import("../state/phase-authority").PhaseAuthorityResult;
     };
     metadata?: Record<string, any>;
 }

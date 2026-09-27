@@ -1,4 +1,4 @@
-import { EngineV2Input, EngineV2MarketSubtype, MarketJudgmentOutput } from "../types";
+import { EngineV2Input, EngineV2MarketSubtype, EngineV2Regime, MarketJudgmentOutput } from "../types";
 import { Candle, classifyRangeZone } from "../../models/types";
 import { emaLastFromCloses, computeSlopesFromCandles } from "../../utils/math";
 import { updateWhipsawObservation, whipsawObservationAuthority } from "./whipsaw-observer";
@@ -19,6 +19,8 @@ import {
     resolveTrendRangeScoreAuthority,
     type TrendRangeScoreAuthority
 } from "./trend-range-score-authority";
+import { applyRegimeAuthority } from "../state/regime-authority";
+import { resolvePhaseAuthority } from "../state/phase-authority";
 import {
     getClosedCandlesForStructuralStop,
     resolveFastTrendShiftStructuralStop
@@ -1315,7 +1317,7 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
     // Authoritative base regime is canonicalRegime
     let regime: MarketJudgmentOutput["regime"] = canonicalRegime;
 
-    let regime_final = regime;
+    let regime_final: EngineV2Regime = regime;
     let no_trade_reason: string | null = null;
     const data_ready = sn.data_ready;
     const dump_protection_hit = sn.dump_protection_hit;
@@ -1906,6 +1908,36 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
         );
     }
 
+    const regimeAuthority = applyRegimeAuthority({
+        symbol: String(input.symbol),
+        regimeFinal: regime_final,
+        emaGap: Number(sn.emaGap ?? 0),
+        trendPhase,
+        transitionPhase: transitionPhaseOut,
+        htfBias,
+        scoreAuthority: trendRangeScoreAuthority,
+        whipsawActive: whipsaw.active,
+        whipsawSoftWatch: whipsaw.isSoftWatch,
+        shockPhase,
+        directionalShockState: String(input.state.directionalShockState ?? "NONE")
+    });
+    regime_final = regimeAuthority.regimeFinal;
+
+    const phaseAuthority = resolvePhaseAuthority({
+        subtype: finalSubtype,
+        trendPhase,
+        rangePhase,
+        transitionPhase: transitionPhaseOut,
+        shockPhase,
+        directionalShockState: String(input.state.directionalShockState ?? "NONE"),
+        whipsawActive: whipsaw.active,
+        whipsawSoftWatch: whipsaw.isSoftWatch,
+        scoreAuthority: trendRangeScoreAuthority,
+        fastTrendShiftActive: fastShift.active,
+        lower_high_detected: fastShift.lower_high_detected,
+        lower_low_detected: fastShift.lower_low_detected
+    });
+
     // Detailed Fast Trend Shift Probe Proof
     console.info(JSON.stringify({
         event: "V2_FAST_TREND_SHIFT_PROBE_PROOF",
@@ -1991,6 +2023,8 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
                 counter_trend_risk: counterTrendRisk
             },
             trendRangeScoreAuthority: trendRangeScoreAuthority ?? undefined,
+            regimeAuthority,
+            phaseAuthority,
             fastTrendShift: {
                 active: fastShift.active,
                 direction: fastShift.direction,
