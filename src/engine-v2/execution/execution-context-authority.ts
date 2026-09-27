@@ -2,6 +2,8 @@ import type { EngineV2Side } from "../types";
 import type { RegimeAuthorityResult } from "../state/regime-authority";
 import type { PhaseAuthorityResult } from "../state/phase-authority";
 import type { HighwayLifecycleStage } from "../highway-core/highway-lifecycle-authority";
+import type { RecoveryAuthorityResult } from "../state/recovery-authority";
+import type { ShockOverlayAuthority } from "../state/phase-authority";
 
 export type ExecutionActionAuthority =
     | "WAIT"
@@ -25,6 +27,7 @@ export type ExecutionContextAuthorityResult = Readonly<{
     rr_ok: boolean;
     chase_blocked: boolean;
     shock_hard_block: boolean;
+    execution_block_reason: string | null;
 }>;
 
 export function alignCandidateSideToRegimeDirection(args: Readonly<{
@@ -63,6 +66,16 @@ export type Highway3LayerAuthorityProof = Readonly<{
     htf_1d_bias: string;
     phase: string;
     phase_reason: string;
+    phase_before: string;
+    phase_after: string;
+    recovery_candidate: boolean;
+    recovery_confirmed: boolean;
+    recovery_direction: string;
+    recovery_evidence: readonly string[];
+    candidate_direction_source_before: string;
+    candidate_direction_source_after: string;
+    candidate_side_before: string;
+    candidate_side_after: string;
     higher_low: boolean;
     higher_high: boolean;
     lower_high: boolean;
@@ -73,6 +86,7 @@ export type Highway3LayerAuthorityProof = Readonly<{
     shock_overlay: string;
     crash_state: string;
     shock_hard_block: boolean;
+    execution_block_reason: string | null;
     execution_action: string;
     execution_direction_source: string;
     candidate_side: string;
@@ -95,6 +109,78 @@ function crashHard(crashState: string): boolean {
     return u.includes("LOCK") || u.includes("EXIT");
 }
 
+function shockOverlayOpposesSide(overlay: ShockOverlayAuthority, side: "long" | "short"): boolean {
+    return (side === "long" && overlay === "DOWN_SHOCK") || (side === "short" && overlay === "UP_SHOCK");
+}
+
+export function resolveShockExecutionGate(args: Readonly<{
+    shockOverlay: ShockOverlayAuthority;
+    crashState: string;
+    whipsawActive: boolean;
+    recoveryAuthority?: RecoveryAuthorityResult | null;
+    candidateSide: "long" | "short" | "none";
+}>): Readonly<{
+    shock_hard_block: boolean;
+    shock_execution_block: boolean;
+    execution_block_reason: string | null;
+}> {
+    const overlay = args.shockOverlay;
+    if (crashHard(args.crashState)) {
+        return {
+            shock_hard_block: true,
+            shock_execution_block: true,
+            execution_block_reason: "CRASH_HARD_BLOCK"
+        };
+    }
+    if (args.whipsawActive) {
+        return {
+            shock_hard_block: true,
+            shock_execution_block: true,
+            execution_block_reason: "WHIPSAW_HARD_BLOCK"
+        };
+    }
+
+    const recovery = args.recoveryAuthority;
+    const recoveryConfirmed =
+        recovery?.recovery_confirmed === true &&
+        (recovery.recovery_direction === "long" || recovery.recovery_direction === "short");
+    const permissionSide: "long" | "short" | "none" =
+        args.candidateSide === "long" || args.candidateSide === "short"
+            ? args.candidateSide
+            : recovery?.recovery_direction === "long" || recovery?.recovery_direction === "short"
+              ? recovery.recovery_direction
+              : "none";
+
+    if (overlay === "NONE" || overlay === "CRASH_RECOVERY" || overlay === "PUMP_RECOVERY") {
+        return {
+            shock_hard_block: false,
+            shock_execution_block: false,
+            execution_block_reason: null
+        };
+    }
+
+    if (recoveryConfirmed && permissionSide !== "none") {
+        if (shockOverlayOpposesSide(overlay, permissionSide)) {
+            return {
+                shock_hard_block: true,
+                shock_execution_block: true,
+                execution_block_reason: "SHOCK_OPPOSES_RECOVERY_DIRECTION"
+            };
+        }
+        return {
+            shock_hard_block: false,
+            shock_execution_block: false,
+            execution_block_reason: null
+        };
+    }
+
+    return {
+        shock_hard_block: false,
+        shock_execution_block: true,
+        execution_block_reason: "SHOCK_OVERLAY_ACTIVE"
+    };
+}
+
 export function resolveExecutionContextAuthority(args: Readonly<{
     regime: RegimeAuthorityResult;
     phase: PhaseAuthorityResult;
@@ -110,11 +196,11 @@ export function resolveExecutionContextAuthority(args: Readonly<{
     edgeOk?: boolean;
     rrOk?: boolean;
     rawCandidateSide?: EngineV2Side;
+    recoveryAuthority?: RecoveryAuthorityResult | null;
 }>): ExecutionContextAuthorityResult {
-    const shock_hard_block = crashHard(args.crashState) || args.whipsawActive;
-
     let execution_action: ExecutionActionAuthority = "WAIT";
     let entry_side: EngineV2Side = "none";
+    let execution_block_reason: string | null = null;
 
     const rawCandidate: EngineV2Side =
         args.rawCandidateSide === "long" || args.rawCandidateSide === "short"
@@ -129,17 +215,37 @@ export function resolveExecutionContextAuthority(args: Readonly<{
     const candidate_side = alignment.after;
     const execution_direction_source = alignment.source;
 
-    const setupLong =
-        args.regime.canonicalRegime === "TREND_UP" &&
-        (args.phase.phase === "PULLBACK" || args.phase.phase === "BREAKOUT" || args.phase.phase === "RETEST" || args.phase.phase === "CONTINUATION");
-    const setupShort =
-        args.regime.canonicalRegime === "TREND_DOWN" &&
-        (args.phase.phase === "PULLBACK" || args.phase.phase === "BREAKOUT" || args.phase.phase === "RETEST" || args.phase.phase === "CONTINUATION");
+    const shockGate = resolveShockExecutionGate({
+        shockOverlay: args.phase.shockOverlay,
+        crashState: args.crashState,
+        whipsawActive: args.whipsawActive,
+        recoveryAuthority: args.recoveryAuthority,
+        candidateSide:
+            candidate_side === "long" || candidate_side === "short" ? candidate_side : "none"
+    });
+    const shock_hard_block = shockGate.shock_hard_block;
+    execution_block_reason = shockGate.execution_block_reason;
 
-    if (shock_hard_block) {
-        execution_action = "WAIT";
-        entry_side = "none";
-    } else if (args.phase.shockOverlay !== "NONE") {
+    const recoverySetupPhase =
+        args.phase.phase === "RECOVERY" || args.phase.phase === "RECLAIM";
+    const setupLong =
+        (args.regime.canonicalRegime === "TREND_UP" ||
+            (args.regime.canonicalRegime === "RANGE" && recoverySetupPhase)) &&
+        (args.phase.phase === "PULLBACK" ||
+            args.phase.phase === "BREAKOUT" ||
+            args.phase.phase === "RETEST" ||
+            args.phase.phase === "CONTINUATION" ||
+            recoverySetupPhase);
+    const setupShort =
+        (args.regime.canonicalRegime === "TREND_DOWN" ||
+            (args.regime.canonicalRegime === "RANGE" && recoverySetupPhase)) &&
+        (args.phase.phase === "PULLBACK" ||
+            args.phase.phase === "BREAKOUT" ||
+            args.phase.phase === "RETEST" ||
+            args.phase.phase === "CONTINUATION" ||
+            recoverySetupPhase);
+
+    if (shockGate.shock_execution_block) {
         execution_action = "WAIT";
         entry_side = "none";
     } else if (args.phase.phase === "DEEP_PULLBACK" && args.regime.canonicalRegime.startsWith("TREND")) {
@@ -166,7 +272,7 @@ export function resolveExecutionContextAuthority(args: Readonly<{
         execution_action = "WAIT";
     }
 
-    if (args.phase.phase === "WHIPSAW" || args.phase.phase === "CONSOLIDATION") {
+    if (args.phase.phase === "WHIPSAW" || (args.phase.phase === "CONSOLIDATION" && !recoverySetupPhase)) {
         if (execution_action === "LONG_SETUP" || execution_action === "SHORT_SETUP") {
             execution_action = "WAIT";
         }
@@ -192,7 +298,8 @@ export function resolveExecutionContextAuthority(args: Readonly<{
         edge_ok: args.edgeOk ?? highway_entry_gate_reached,
         rr_ok: args.rrOk ?? highway_entry_gate_reached,
         chase_blocked: args.chaseBlocked ?? args.highwayGateRejected,
-        shock_hard_block
+        shock_hard_block,
+        execution_block_reason
     };
 }
 
@@ -207,9 +314,12 @@ export function buildHighway3LayerAuthorityProof(args: Readonly<{
     defensiveAuthorityActive: boolean;
     pyramidAuthorityActive: boolean;
     trendCandidateDirectionSource: string;
+    candidateDirectionSourceBefore: string;
+    candidateDirectionSourceAfter: string;
     emaGap: number;
     candidateSideBeforeRegimeAuthority: string;
     candidateSideAfterRegimeAuthority: string;
+    recoveryAuthority?: import("../state/recovery-authority").RecoveryAuthorityResult | null;
 }>): Highway3LayerAuthorityProof {
     return {
         symbol: args.symbol,
@@ -230,6 +340,16 @@ export function buildHighway3LayerAuthorityProof(args: Readonly<{
         htf_1d_bias: args.regime.htf_1d_bias,
         phase: args.phase.phase,
         phase_reason: args.phase.phaseReason,
+        phase_before: args.phase.phase_before,
+        phase_after: args.phase.phase_after,
+        recovery_candidate: args.recoveryAuthority?.recovery_candidate === true,
+        recovery_confirmed: args.recoveryAuthority?.recovery_confirmed === true,
+        recovery_direction: String(args.recoveryAuthority?.recovery_direction ?? "none"),
+        recovery_evidence: args.recoveryAuthority?.recovery_evidence ?? [],
+        candidate_direction_source_before: args.candidateDirectionSourceBefore,
+        candidate_direction_source_after: args.candidateDirectionSourceAfter,
+        candidate_side_before: args.candidateSideBeforeRegimeAuthority,
+        candidate_side_after: args.candidateSideAfterRegimeAuthority,
         higher_low: args.phase.higher_low,
         higher_high: args.phase.higher_high,
         lower_high: args.phase.lower_high,
@@ -240,6 +360,7 @@ export function buildHighway3LayerAuthorityProof(args: Readonly<{
         shock_overlay: args.phase.shockOverlay,
         crash_state: String(args.crashState ?? "NONE"),
         shock_hard_block: args.execution.shock_hard_block,
+        execution_block_reason: args.execution.execution_block_reason,
         execution_action: args.execution.execution_action,
         execution_direction_source: args.execution.execution_direction_source,
         candidate_side: String(args.execution.candidate_side),

@@ -1031,6 +1031,7 @@ export interface MarketJudgmentOutput {
         trendRangeScoreAuthority?: import("../market-judgment/trend-range-score-authority").TrendRangeScoreAuthority;
         regimeAuthority?: import("../state/regime-authority").RegimeAuthorityResult;
         phaseAuthority?: import("../state/phase-authority").PhaseAuthorityResult;
+        recoveryAuthority?: import("../state/recovery-authority").RecoveryAuthorityResult;
     };
     metadata?: Record<string, any>;
 }

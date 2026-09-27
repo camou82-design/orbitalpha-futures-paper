@@ -21,6 +21,7 @@ import {
 } from "./trend-range-score-authority";
 import { applyRegimeAuthority } from "../state/regime-authority";
 import { resolvePhaseAuthority } from "../state/phase-authority";
+import { evaluateStructuralRecoveryAuthority } from "../state/recovery-authority";
 import {
     getClosedCandlesForStructuralStop,
     resolveFastTrendShiftStructuralStop
@@ -1886,6 +1887,23 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
     });
     regime_final = regimeAuthority.regimeFinal;
 
+    const recoveryAuthority = evaluateStructuralRecoveryAuthority({
+        whipsawActive: whipsaw.active,
+        whipsawSoftWatch: whipsaw.isSoftWatch,
+        whipsawReleaseEligible: whipsaw.releaseEligible,
+        higher_low: trendRangeScoreAuthority?.higher_low === true,
+        higher_high: trendRangeScoreAuthority?.higher_high === true,
+        lower_low: fastShift.lower_low_detected === true,
+        lower_high: fastShift.lower_high_detected === true,
+        upper_breakout_hold: trendRangeScoreAuthority?.upper_breakout_hold === true,
+        lower_breakdown_hold: trendRangeScoreAuthority?.lower_breakdown_hold === true,
+        box_mid_reclaimed: fastShift.box_mid_reclaimed === true,
+        htfEntryPolicy,
+        htfBias,
+        reclaimConfirmed: whipsaw.reclaimConfirmed,
+        retestConfirmed: whipsaw.retestConfirmed
+    });
+
     const phaseAuthority = resolvePhaseAuthority({
         subtype: finalSubtype,
         trendPhase,
@@ -1898,7 +1916,11 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
         scoreAuthority: trendRangeScoreAuthority,
         fastTrendShiftActive: fastShift.active,
         lower_high_detected: fastShift.lower_high_detected,
-        lower_low_detected: fastShift.lower_low_detected
+        lower_low_detected: fastShift.lower_low_detected,
+        box_mid_reclaimed: fastShift.box_mid_reclaimed === true,
+        reclaimConfirmed: whipsaw.reclaimConfirmed,
+        retestConfirmed: whipsaw.retestConfirmed,
+        recoveryAuthority
     });
 
     // Detailed Fast Trend Shift Probe Proof
@@ -1988,6 +2010,7 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
             trendRangeScoreAuthority: trendRangeScoreAuthority ?? undefined,
             regimeAuthority,
             phaseAuthority,
+            recoveryAuthority,
             fastTrendShift: {
                 active: fastShift.active,
                 direction: fastShift.direction,

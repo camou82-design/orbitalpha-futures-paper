@@ -2067,9 +2067,12 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const riskLongAllow = v2State.longAllow;
     const riskShortAllow = v2State.shortAllow;
     const trendCandidateAuthority = resolveTrendExecutionCandidateDirection({
+        symbol: String(input.symbol),
         directionalShockState: shock,
         emaGap,
-        canonicalRegime: judgment.diagnostics?.regimeAuthority?.canonicalRegime ?? null
+        canonicalRegime: judgment.diagnostics?.regimeAuthority?.canonicalRegime ?? null,
+        recoveryAuthority: judgment.diagnostics?.recoveryAuthority ?? null,
+        htfEntryPolicy: judgment.htf_entry_policy ?? null
     });
     const trendSideCandidate: EngineV2Side = trendCandidateAuthority.candidateSide;
     if (!execution.metadata) {
@@ -3290,9 +3293,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             }));
         }
 
+        const recoveryConfirmedForWhipsaw =
+            judgment.diagnostics?.recoveryAuthority?.recovery_confirmed === true;
         const isWhipsawRecheckBlock =
             whipsawShockRecheckActive ||
-            judgment.subtype === "WHIPSAW_SOFT_WATCH" ||
+            (judgment.subtype === "WHIPSAW_SOFT_WATCH" && !recoveryConfirmedForWhipsaw) ||
             v2RejectReasonAfterPromotion === "WHIPSAW_SHOCK_RECHECK";
         const htfHoldBlock = judgment.htf_entry_policy === "HOLD" || judgment.counter_trend_risk === true;
         if (isWhipsawRecheckBlock && (v2DecisionAfterPromotion === "HOLD" || v2DecisionAfterPromotion === "SKIP" || v2DecisionAfterPromotion === "REJECT" || htfHoldBlock)) {
@@ -11414,7 +11419,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             qualityScore,
             expectedNextAction,
             whipsawActive: whipsawHard,
-            crashState: String(v2State.crashState ?? "NONE")
+            crashState: String(v2State.crashState ?? "NONE"),
+            recoveryAuthority: judgment.diagnostics?.recoveryAuthority ?? null
         });
         const highwayLineageForProof = resolveCanonicalHighwayLineage({
             isHighwayLineageExplicit: decision.metadata?.isHighwayLineage === true,
@@ -11438,13 +11444,16 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     pyramidAuthorityActive:
                         pnlPctLifecycle > 0 && protectedPyramidCount === 0 && highwayLifecycleProof.active,
                     trendCandidateDirectionSource: trendCandidateAuthority.trendCandidateDirectionSource,
+                    candidateDirectionSourceBefore: trendCandidateAuthority.candidateDirectionSourceBefore,
+                    candidateDirectionSourceAfter: trendCandidateAuthority.candidateDirectionSourceAfter,
                     emaGap,
                     candidateSideBeforeRegimeAuthority: String(
                         trendCandidateAuthority.candidateSideBeforeRegimeAuthority
                     ),
                     candidateSideAfterRegimeAuthority: String(
                         trendCandidateAuthority.candidateSideAfterRegimeAuthority
-                    )
+                    ),
+                    recoveryAuthority: judgment.diagnostics?.recoveryAuthority ?? null
                 })
             })
         );
