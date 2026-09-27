@@ -419,6 +419,12 @@ import {
   shouldAttachFullPositionProtectiveTp as shouldAttachFullPositionProtectiveTpCore,
   resolveProtectiveTpPlan
 } from "../engine-v2/execution/protective-tp-authority";
+import { resolveHighwayLineageFromOpenPosition } from "../engine-v2/highway-core/highway-lineage-authority";
+import {
+  resolveHighwayLifecycleStage,
+  stampHighwayLifecycleAfterDefensiveFill,
+  stampHighwayLifecycleAfterProtectedPyramidFill
+} from "../engine-v2/highway-core/highway-lifecycle-authority";
 import {
   evaluateTerminalReentryBarrier,
   buildTerminalReentryBarrierProof
@@ -12279,6 +12285,7 @@ export class PaperEngine {
     });
 
     const isTp1FilledForReconcile = (open.partialExitStage ?? 0) >= 1 || (open as any).tp1Triggered === true;
+    const openHighwayLineage = resolveHighwayLineageFromOpenPosition(open as any);
     const tpPlanResolution = resolveProtectiveTpPlan({
       isV2Authority: open.isV2Authority === true,
       regime,
@@ -12296,7 +12303,8 @@ export class PaperEngine {
       takeProfit2Px: open.takeProfit2Px,
       takeProfitPlan: open.takeProfitPlan,
       tp1Filled: isTp1FilledForReconcile,
-      partialExitStage: open.partialExitStage
+      partialExitStage: open.partialExitStage,
+      highwayLifecycleStage: openHighwayLineage ? resolveHighwayLifecycleStage(open as any).stage : null
     });
 
     if (tpPlanResolution.exchangeTpRequired && tpPlanResolution.exchangeTpPrice != null && tpPlanResolution.exchangeTpPrice > 0) {
@@ -24857,6 +24865,50 @@ export class PaperEngine {
       : { ok: false, reason: "addon_trend_structure_not_reinforced" };
   }
 
+  /** Highway / adverse ledger stamps apply only after addon fill is confirmed (not at submit). */
+  private applyAddonFillConfirmedLedgerUpdates(
+    scaledRecord: PaperOpenPositionRecord,
+    existing: PaperOpenPositionRecord,
+    opts: Readonly<{
+      isAdverseAddonPath: boolean;
+      isHighwayPyramidFill: boolean;
+      lastAdverseConfirmationCandleTs?: number;
+    }>
+  ): PaperOpenPositionRecord {
+    let record = scaledRecord;
+    if (opts.isAdverseAddonPath) {
+      const candlePatch =
+        typeof opts.lastAdverseConfirmationCandleTs === "number" && opts.lastAdverseConfirmationCandleTs > 0
+          ? { lastAdverseConfirmationCandleTs: opts.lastAdverseConfirmationCandleTs }
+          : {};
+      if (resolveHighwayLineageFromOpenPosition(existing)) {
+        record = {
+          ...record,
+          ...stampHighwayLifecycleAfterDefensiveFill(existing),
+          ...candlePatch
+        };
+      } else {
+        record = {
+          ...record,
+          adverseAddonCount: (existing.adverseAddonCount ?? 0) + 1,
+          ...candlePatch
+        };
+      }
+    } else if (opts.isHighwayPyramidFill && resolveHighwayLineageFromOpenPosition(existing)) {
+      record = { ...record, ...stampHighwayLifecycleAfterProtectedPyramidFill(existing) };
+    }
+    return record;
+  }
+
+  private static okxSubmitRepresentsAddonFill(submitRes: {
+    ok?: boolean;
+    fillConfirmed?: boolean;
+    orderState?: string | null;
+  }): boolean {
+    if (submitRes.ok !== true) return false;
+    return submitRes.fillConfirmed === true || submitRes.orderState === "filled";
+  }
+
   private async tryPaperPositionScaleIn(
     existing: PaperOpenPositionRecord,
     envelope: PaperEngineDecisionEnvelope,
@@ -25285,18 +25337,6 @@ export class PaperEngine {
         ? ("REATTACK_USED" as RangeManagementState)
         : (existing.rangeManagementState ?? "INIT"),
       addonRebuildRequired: true, // Trigger protection rebuild on next reconciliation
-      ...(isAdverseAddonPath
-        ? {
-            adverseAddonCount: (existing.adverseAddonCount ?? 0) + 1,
-            ...((): Record<string, number> => {
-              const candles = first.candles;
-              if (!Array.isArray(candles) || candles.length === 0) return {};
-              const ts = Number(candles[candles.length - 1]?.ts ?? 0);
-              if (!Number.isFinite(ts) || ts <= 0) return {};
-              return { lastAdverseConfirmationCandleTs: ts };
-            })()
-          }
-        : {}),
       stopPrice: typeof res.decision.stopLoss === "number" ? res.decision.stopLoss : existing.stopPrice,
       trailingExtremePrice: existing.side === "long"
         ? Math.max(existing.trailingExtremePrice ?? 0, first.lastPrice)
@@ -25330,12 +25370,24 @@ export class PaperEngine {
       });
     }
 
+    const isHighwayPyramidFill =
+      !isAdverseAddonPath &&
+      authority.addOnPolicyMode === "PYRAMIDING" &&
+      resolveHighwayLineageFromOpenPosition(existing);
+    const candles = first.candles;
+    const lastAdverseCandleTs =
+      Array.isArray(candles) && candles.length > 0
+        ? Number(candles[candles.length - 1]?.ts ?? 0)
+        : 0;
+    const lastAdverseConfirmationCandleTs =
+      Number.isFinite(lastAdverseCandleTs) && lastAdverseCandleTs > 0 ? lastAdverseCandleTs : undefined;
+
     if (this.okxDemo) {
       const sSide = existing.side === "long" ? "buy" : "sell";
       const sPosSide = existing.side === "long" ? "long" : "short";
       const sQtyLegacy = Math.max(0.001, Math.round((incrementalSizeUsd / Math.max(1e-9, first.lastPrice)) * 1_000_000) / 1_000_000);
       const sLev = Math.max(1, existing.leverage ?? authority.appliedLeverage ?? 1);
-      await this.submitOkxOrder({
+      const submitRes = await this.submitOkxOrder({
         symbol: existing.symbol,
         side: sSide,
         posSide: sPosSide,
@@ -25355,9 +25407,21 @@ export class PaperEngine {
         logAdverseAddonOrderUnitProof: isAdverseAddonPath,
         requestedAddonNotionalUsdtCap: isAdverseAddonPath ? incrementalSizeUsd : undefined
       });
+      if (!PaperEngine.okxSubmitRepresentsAddonFill(submitRes)) {
+        return null;
+      }
+      return this.applyAddonFillConfirmedLedgerUpdates(updatedRecord, existing, {
+        isAdverseAddonPath,
+        isHighwayPyramidFill,
+        lastAdverseConfirmationCandleTs
+      });
     }
 
-    return updatedRecord;
+    return this.applyAddonFillConfirmedLedgerUpdates(updatedRecord, existing, {
+      isAdverseAddonPath,
+      isHighwayPyramidFill,
+      lastAdverseConfirmationCandleTs
+    });
   }
 
   private async pollSymbol(
@@ -26253,8 +26317,9 @@ export class PaperEngine {
     existingPositions: PaperOpenPositionRecord[];
     v2Decision: EngineV2Decision;
     pendingList: any[];
+    addOnPolicyMode?: "CONFIRMED_ADVERSE_ADDON" | "PYRAMIDING" | "NONE" | string;
   }): Promise<{ executed: boolean; submitResult?: any; blockReason?: string | null; updatedRecord?: PaperOpenPositionRecord; pendingOnly?: boolean }> {
-    const { symbol, sideCandidate, finalOrderNotionalUsdt, appliedLeverage, stopPrice, invalidationPx, lastPrice, existing, existingPositions, v2Decision, pendingList } = params;
+    const { symbol, sideCandidate, finalOrderNotionalUsdt, appliedLeverage, stopPrice, invalidationPx, lastPrice, existing, existingPositions, v2Decision, pendingList, addOnPolicyMode } = params;
 
     if (!existing) {
       return { executed: false, blockReason: "NO_EXISTING_POSITION_FOR_ADDON" };
@@ -26326,7 +26391,13 @@ export class PaperEngine {
     const newEntryPrice = (existing.entryPrice * existing.sizeUsd + fillPx * filledNotional) / newTotalSizeUsd;
     const nextStage = (existing.entryStage ?? 1) + 1;
 
-    const updatedRecord: PaperOpenPositionRecord = {
+    const isAdverseAddonPath = addOnPolicyMode === "CONFIRMED_ADVERSE_ADDON";
+    const isHighwayPyramidFill =
+      !isAdverseAddonPath &&
+      addOnPolicyMode === "PYRAMIDING" &&
+      resolveHighwayLineageFromOpenPosition(existing);
+
+    let updatedRecord: PaperOpenPositionRecord = {
       ...existing,
       sizeUsd: newTotalSizeUsd,
       entryPrice: newEntryPrice,
@@ -26336,6 +26407,10 @@ export class PaperEngine {
       stopPrice,
       invalidationPx
     };
+    updatedRecord = this.applyAddonFillConfirmedLedgerUpdates(updatedRecord, existing, {
+      isAdverseAddonPath,
+      isHighwayPyramidFill
+    });
 
     // Rebuild protective stop order for filled portion
     let stopCreated = false;
@@ -26834,6 +26909,10 @@ export function buildV2StateBridge(
           breakevenStopPrice: p.breakevenStopPrice,
           addonCount: p.addonCount,
           adverseAddonCount: p.adverseAddonCount,
+          highwayLifecycleStage: p.highwayLifecycleStage,
+          highwayDefensiveAddonExecuted: p.highwayDefensiveAddonExecuted === true,
+          highwayProtectedPyramidExecuted: p.highwayProtectedPyramidExecuted === true,
+          highwayPyramidAddonCount: p.highwayPyramidAddonCount,
           adverseMoveAnchorCandleTs: p.adverseMoveAnchorCandleTs,
           lastAdverseConfirmationCandleTs: p.lastAdverseConfirmationCandleTs,
           structureBreached: p.structureBreached === true,

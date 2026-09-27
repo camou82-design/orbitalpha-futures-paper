@@ -21,6 +21,7 @@ import {
 import { HighwayTrendState } from "../models/types";
 import type { HighwayDirectionalAuthority } from "../engine-v2/highway-core/highway-directional-authority";
 import { resolveLiveSubmitStaticSafetyCap } from "./paper-engine";
+import { resolveHighwayLifecycleStage } from "../engine-v2/highway-core/highway-lifecycle-authority";
 
 describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
   const DEFAULT_EQUITY = 2300;
@@ -269,19 +270,15 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
     assert.equal(res.preLotNotionalUsdt, 5175);
   });
 
-  it("6. Defensive Add executed (adverseAddonCount=1) → subsequent Pyramid is strictly forbidden", () => {
-    const mockV2State: any = {
-      longPosition: {
-        side: "long",
-        entryPrice: 65000,
-        sizeUsd: 1092.5,
-        pnlPct: 0.015,
-        adverseAddonCount: 1,
-        addonCount: 1,
-        breakevenStopConfirmed: true
-      }
-    };
-    assert.ok(mockV2State.longPosition.adverseAddonCount > 0);
+  it("6. Defensive add with addonCount=1 adverseAddonCount=1 → stage DEFENSIVE not PYRAMID (CASE I)", () => {
+    const resolved = resolveHighwayLifecycleStage({
+      adverseAddonCount: 1,
+      addonCount: 1,
+      highwayDefensiveAddonExecuted: true,
+      highwayLifecycleStage: "HIGHWAY_DEFENSIVE_ADVERSE"
+    } as any);
+    assert.equal(resolved.stage, "HIGHWAY_DEFENSIVE_ADVERSE");
+    assert.notEqual(resolved.stage, "HIGHWAY_PROTECTED_PYRAMID");
   });
 
   it("7. Pyramid executed (addonCount=1, adverseAddonCount=0) → subsequent Defensive Add is strictly forbidden", () => {
@@ -347,7 +344,7 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
     assert.equal(res.mode, "NONE");
     assert.equal(res.fullPositionTpRequired, false);
     assert.equal(res.exchangeTpRequired, false);
-    assert.equal(res.reason, "HIGHWAY_LIFECYCLE_PROTECTIVE_TP_DEFERRED");
+    assert.equal(res.reason, "HIGHWAY_LIFECYCLE_HIGHWAY_INITIAL_PROTECTIVE_TP_DEFERRED");
   });
 
   it("10. Long adverse + single weak quality (< 70) alone → does NOT mark DIRECTION_UNCERTAIN or INVALID", () => {
@@ -512,10 +509,9 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
 
   // --- Highway 2-Track Profit Pyramid Continuation & Net Protection Tests ---
 
-  it("18. +49 USDT profit → Pyramid strictly blocked (PYRAMID_PROFIT_BELOW_50_USDT)", () => {
-    // entry 65000, current 70500 -> (70500 - 65000)/65000 * 575 = 48.65 USDT (< 50)
-    const entryPrice = 65000;
-    const currentPrice = 70500;
+  it("18. modest +USDT profit (below legacy 50 floor) + stop lock + continuation → pyramid allowed (CASE H)", () => {
+    const entryPrice = 60000;
+    const currentPrice = 64900;
     const res = evaluateV2AddOnPolicy({
       symbol: "BTCUSDT",
       side: "long",
@@ -525,13 +521,13 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
           side: "long",
           entryPrice,
           sizeUsd: 575,
-          pnlPct: 48.65 / 575,
+          pnlPct: 46.96 / 575,
           isHighwayLineage: true,
           breakevenStopConfirmed: true,
           adverseAddonCount: 0
         },
         okxAlgoOrdersList: [
-          { instId: "BTC-USDT-SWAP", side: "sell", state: "live", triggerPx: 70000, algoType: "stop" }
+          { instId: "BTC-USDT-SWAP", side: "sell", state: "live", triggerPx: 70600, algoType: "stop" }
         ]
       } as any,
       judgment: {
@@ -554,9 +550,11 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
       }
     });
 
-    assert.equal(res.allowed, false);
-    assert.equal(res.action, "ADDON_WATCH");
-    assert.equal(res.addonBlockedReason, "PYRAMID_PROFIT_BELOW_50_USDT");
+    assert.equal(res.allowed, true);
+    assert.equal(res.action, "ADDON_ALLOWED");
+    const riskBefore = Number((res.riskProjection as { riskBeforeAddonUsdt?: number })?.riskBeforeAddonUsdt);
+    assert.ok(riskBefore < 50, "unrealized profit below removed 50 USDT fixed gate");
+    assert.notEqual(res.addonBlockedReason, "PYRAMID_PROFIT_BELOW_50_USDT");
   });
 
   it("19. +50 USDT + valid pullback/retest → Pullback Pyramid allowed (HIGHWAY_PULLBACK_PYRAMID_ALLOWED)", () => {
@@ -697,16 +695,16 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
     assert.equal(res.allowed, false);
     assert.equal(res.action, "ADDON_WATCH");
     assert.equal(res.reason, "MOMENTUM_AUTHORITY_NOT_CONFIRMED");
-    assert.equal(res.addonBlockedReason, "PLAIN_TREND_PHASE_INSUFFICIENT");
+    assert.equal(res.addonBlockedReason, "TREND_CONTINUATION_NOT_CONFIRMED");
   });
 
-  it("22. Additional entry with weighted avg net protected profit 39 USDT (< 40) → blocked (NET_PROTECTED_PROFIT_BELOW_40_USDT)", () => {
+  it("22. Net protected profit below equity minimum floor → blocked (NET_PROTECTED_PROFIT_BELOW_MINIMUM)", () => {
     const entryPrice = 60000;
     const currentPrice = 70000;
     const res = evaluateV2AddOnPolicy({
       symbol: "BTCUSDT",
       side: "long",
-      accountEquityUsd: 230,
+      accountEquityUsd: 40000,
       v2State: {
         longPosition: {
           side: "long",
@@ -743,11 +741,11 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
 
     assert.equal(res.allowed, false);
     assert.equal(res.action, "ADDON_WATCH");
-    assert.equal(res.addonBlockedReason, "NET_PROTECTED_PROFIT_BELOW_40_USDT");
-    assert.ok(Number(res.lockedProfitUsdt) < 40);
+    assert.equal(res.addonBlockedReason, "NET_PROTECTED_PROFIT_BELOW_MINIMUM");
+    assert.ok(Number(res.lockedProfitUsdt) < Math.max(0.5, 40000 * 0.0015));
   });
 
-  it("23. Net protected profit >= 40 USDT → allowed with verified stop lock", () => {
+  it("23. Net protected profit >= equity minimum → allowed with verified stop lock", () => {
     const entryPrice = 60000;
     const currentPrice = 70000;
     const res = evaluateV2AddOnPolicy({
@@ -860,7 +858,7 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
     assert.equal(shockRes.addonBlockedReason, "OPPOSING_THREAT_ACTIVE");
   });
 
-  it("25. adverseAddonCount > 0 → Pyramid strictly forbidden", () => {
+  it("25. CASE J: after defensive add, recovery + stop lock + continuation → protected pyramid allowed", () => {
     const entryPrice = 65000;
     const currentPrice = 71000;
     const res = evaluateV2AddOnPolicy({
@@ -875,7 +873,10 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
           pnlPct: 0.08,
           isHighwayLineage: true,
           breakevenStopConfirmed: true,
-          adverseAddonCount: 1 // adverse addon already executed
+          adverseAddonCount: 1,
+          addonCount: 1,
+          highwayDefensiveAddonExecuted: true,
+          highwayLifecycleStage: "HIGHWAY_DEFENSIVE_ADVERSE"
         },
         okxAlgoOrdersList: [{ instId: "BTC-USDT-SWAP", side: "sell", state: "live", triggerPx: 70600, algoType: "stop" }]
       } as any,
@@ -890,9 +891,8 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
       snapshot: { lastPrice: currentPrice, atr: 50, qualityScore: 85, reviewing_ticks: 3, boxPos: 0.5, emaGap: 0.01, trendWeaknessScore: 0.2, rangeConfidence: null }
     });
 
-    assert.equal(res.allowed, false);
-    assert.equal(res.action, "ADDON_FORBIDDEN");
-    assert.equal(res.addonBlockedReason, "PYRAMID_FORBIDDEN_AFTER_ADVERSE_ADD");
+    assert.equal(res.allowed, true);
+    assert.equal(res.action, "ADDON_ALLOWED");
   });
 
   // =============================================================
@@ -1104,7 +1104,7 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
     assert.equal(res.allowed, false);
     assert.equal(res.action, "ADDON_WATCH");
     assert.equal(res.reason, "MOMENTUM_AUTHORITY_NOT_CONFIRMED");
-    assert.equal(res.addonBlockedReason, "PLAIN_TREND_PHASE_INSUFFICIENT");
+    assert.equal(res.addonBlockedReason, "TREND_CONTINUATION_NOT_CONFIRMED");
   });
 
   it("30. [감사2] retestTouched=true + retestRejected=true → Pullback Pyramid 허용 (HIGHWAY_PULLBACK_PYRAMID_ALLOWED)", () => {
@@ -1564,6 +1564,244 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
       highwayDirectional: mockStrongUpHighwayAuth()
     });
     assert.equal(eligible, false);
+  });
+
+  it("lineage isolation: generic addonCount delta must not infer PROTECTED_PYRAMID stage", () => {
+    const resolved = resolveHighwayLifecycleStage({
+      addonCount: 1,
+      adverseAddonCount: 0,
+      isHighwayLineage: false,
+      v2EntryReason: "GENERIC_MOMENTUM_BREAK",
+      entrySemantic: "TREND_MOMENTUM"
+    } as any);
+    assert.equal(resolved.stage, "HIGHWAY_INITIAL");
+    assert.notEqual(resolved.source, "ledger_inferred_pyramid_addon_delta");
+  });
+
+  it("CASE I: addonCount=1 + adverseAddonCount=1 → DEFENSIVE_ADVERSE stage", () => {
+    const resolved = resolveHighwayLifecycleStage({
+      addonCount: 1,
+      adverseAddonCount: 1,
+      highwayDefensiveAddonExecuted: true
+    } as any);
+    assert.equal(resolved.stage, "HIGHWAY_DEFENSIVE_ADVERSE");
+    assert.equal(resolved.source, "ledger_highway_defensive_executed");
+  });
+
+  it("CASE K: after pyramid executed, slight negative pnl → stage stays PROTECTED_PYRAMID", () => {
+    const resolved = resolveHighwayLifecycleStage({
+      addonCount: 2,
+      adverseAddonCount: 1,
+      highwayProtectedPyramidExecuted: true,
+      highwayPyramidAddonCount: 1,
+      highwayLifecycleStage: "HIGHWAY_PROTECTED_PYRAMID",
+      pnlPct: -0.01
+    } as any);
+    assert.equal(resolved.stage, "HIGHWAY_PROTECTED_PYRAMID");
+  });
+
+  it("CASE L: adaptV2Input rehydrate preserves highway lifecycle stage flags", () => {
+    const bridge = {
+      currentPositions: [
+        {
+          symbol: "BTCUSDT" as const,
+          side: "long" as const,
+          entryPrice: 65000,
+          sizeUsd: 1092.5,
+          entryStage: 2,
+          isHighwayLineage: true,
+          entrySemantic: "HIGHWAY_CORE",
+          adverseAddonCount: 1,
+          addonCount: 1,
+          highwayDefensiveAddonExecuted: true,
+          highwayLifecycleStage: "HIGHWAY_DEFENSIVE_ADVERSE" as const
+        }
+      ],
+      globalRiskScore: 0,
+      lossStreaks: {},
+      directionalShockState: "NONE" as const,
+      longAllow: true,
+      shortAllow: true,
+      executionReadiness: true,
+      freshTickBarrierActive: false,
+      freshTickCompletedCycles: 0,
+      freshTickRequiredCycles: 0,
+      serverTradeEnabled: true,
+      accountEquityKrw: 3_220_000
+    };
+    const adapted = adaptV2Input(
+      "BTCUSDT",
+      Date.now(),
+      { lastPrice: 65000, latestCandleClose: 65000, qualityScore: 80 } as any,
+      { baseSizeUsd: 140000, paperMaxOpenPositions: 5 } as any,
+      bridge as any,
+      {} as any
+    );
+    const pos = adapted.state.currentPositions.find((p) => p.symbol === "BTCUSDT");
+    assert.equal(pos?.highwayLifecycleStage, "HIGHWAY_DEFENSIVE_ADVERSE");
+    assert.equal(pos?.highwayDefensiveAddonExecuted, true);
+    const v2State = deriveV2StateAuthority(adapted);
+    assert.equal(
+      resolveHighwayLifecycleStage(v2State.longPosition ?? undefined).stage,
+      "HIGHWAY_DEFENSIVE_ADVERSE"
+    );
+  });
+
+  it("CASE A: slight negative pnl → ledger stage stays INITIAL (not pnl-flipped DEFENSIVE)", () => {
+    const resolved = resolveHighwayLifecycleStage({
+      adverseAddonCount: 0,
+      addonCount: 0,
+      pnlPct: -0.01
+    } as any);
+    assert.equal(resolved.stage, "HIGHWAY_INITIAL");
+    assert.equal(resolved.source, "ledger_initial");
+  });
+
+  it("CASE B: slight positive pnl → ledger stage stays INITIAL (not pnl-flipped PYRAMID)", () => {
+    const resolved = resolveHighwayLifecycleStage({
+      adverseAddonCount: 0,
+      addonCount: 0,
+      pnlPct: 0.02
+    } as any);
+    assert.equal(resolved.stage, "HIGHWAY_INITIAL");
+    assert.equal(resolved.source, "ledger_initial");
+  });
+
+  it("CASE C: adverse addon executed → DEFENSIVE_ADVERSE", () => {
+    const resolved = resolveHighwayLifecycleStage({ adverseAddonCount: 1, addonCount: 0 } as any);
+    assert.equal(resolved.stage, "HIGHWAY_DEFENSIVE_ADVERSE");
+    assert.equal(resolved.source, "ledger_adverse_addon_count");
+  });
+
+  it("CASE D: protected pyramid executed → PROTECTED_PYRAMID", () => {
+    const resolved = resolveHighwayLifecycleStage({
+      adverseAddonCount: 0,
+      addonCount: 1,
+      highwayProtectedPyramidExecuted: true,
+      highwayPyramidAddonCount: 1
+    } as any);
+    assert.equal(resolved.stage, "HIGHWAY_PROTECTED_PYRAMID");
+    assert.equal(resolved.source, "ledger_highway_pyramid_addon_count");
+  });
+
+  it("CASE G: Highway pyramid without protective stop → blocked", () => {
+    const res = evaluateV2AddOnPolicy({
+      symbol: "BTCUSDT",
+      side: "long",
+      accountEquityUsd: 2300,
+      v2State: {
+        longPosition: {
+          side: "long",
+          entryPrice: 60000,
+          sizeUsd: 575,
+          pnlPct: 0.08,
+          isHighwayLineage: true,
+          adverseAddonCount: 0
+        },
+        okxAlgoOrdersList: []
+      } as any,
+      judgment: {
+        regime: "TREND",
+        regime_final: "TREND",
+        trendPhase: "PULLBACK",
+        shockPhase: "NONE",
+        subtype: "NONE"
+      } as any,
+      execution: { metadata: { pullbackConfirmed: true } } as any,
+      snapshot: {
+        lastPrice: 70000,
+        atr: 50,
+        qualityScore: 85,
+        reviewing_ticks: 3,
+        boxPos: 0.5,
+        emaGap: 0.01,
+        trendWeaknessScore: 0.2,
+        rangeConfidence: null
+      }
+    });
+    assert.equal(res.allowed, false);
+    assert.equal(res.addonBlockedReason, "PROTECTIVE_STOP_NOT_REGISTERED");
+  });
+
+  it("CASE E: Highway + TRANSITION → lifecycle bypasses TRANSITION_ADDON_FORBIDDEN", () => {
+    const res = evaluateV2AddOnPolicy({
+      symbol: "BTCUSDT",
+      side: "long",
+      accountEquityUsd: 2300,
+      v2State: {
+        longPosition: {
+          side: "long",
+          entryPrice: 65000,
+          sizeUsd: 575,
+          pnlPct: -0.02,
+          isHighwayLineage: true,
+          v2EntryReason: "HIGHWAY_CORE_ENTRY",
+          adverseAddonCount: 0
+        }
+      } as any,
+      judgment: {
+        regime: "TRANSITION",
+        regime_final: "TRANSITION",
+        transitionPhase: "TREND_TO_RANGE",
+        trendPhase: "PULLBACK",
+        shockPhase: "NONE",
+        subtype: "NONE",
+        rangePhase: "NONE"
+      } as any,
+      execution: { metadata: {} } as any,
+      snapshot: {
+        lastPrice: 63700,
+        atr: 120,
+        qualityScore: 80,
+        reviewing_ticks: 2,
+        boxPos: 0.4,
+        emaGap: 0.01,
+        trendWeaknessScore: 0.25,
+        rangeConfidence: null
+      }
+    });
+    assert.notEqual(res.reason, "TRANSITION_ADDON_FORBIDDEN");
+    assert.notEqual(res.evidence, "transition_addon_forbidden");
+  });
+
+  it("CASE F: Non-Highway + TRANSITION → TRANSITION_ADDON_FORBIDDEN", () => {
+    const res = evaluateV2AddOnPolicy({
+      symbol: "BTCUSDT",
+      side: "long",
+      accountEquityUsd: 2300,
+      v2State: {
+        longPosition: {
+          side: "long",
+          entryPrice: 65000,
+          sizeUsd: 575,
+          pnlPct: 0.05,
+          isHighwayLineage: false,
+          v2EntryReason: "GENERIC_MOMENTUM_BREAK"
+        }
+      } as any,
+      judgment: {
+        regime: "TRANSITION",
+        regime_final: "TRANSITION",
+        transitionPhase: "TREND_TO_RANGE",
+        trendPhase: "UP",
+        shockPhase: "NONE",
+        subtype: "NONE",
+        rangePhase: "NONE"
+      } as any,
+      execution: { metadata: {} } as any,
+      snapshot: {
+        lastPrice: 68000,
+        atr: 100,
+        qualityScore: 85,
+        reviewing_ticks: 3,
+        boxPos: 0.5,
+        emaGap: 0.01,
+        trendWeaknessScore: 0.2,
+        rangeConfidence: null
+      }
+    });
+    assert.equal(res.reason, "TRANSITION_ADDON_FORBIDDEN");
+    assert.equal(res.evidence, "transition_addon_forbidden");
   });
 
   it("44. non-Highway V2 keeps 600 gross notional safety cap (no regression)", () => {

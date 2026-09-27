@@ -7,24 +7,17 @@ import {
 import { V2_POST_SHOCK_COUNTER_PROBE_SEMANTIC } from "../market-judgment/post-shock-probe-episode-authority";
 import {
     MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE,
-    MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE,
-    highwayMarginTargetToNotionalUsdt
+    MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE
 } from "../risk-sizing/equity-adaptive-sizing";
-import { resolveHighwayLineageFromOpenPosition } from "../highway-core/highway-lineage-authority";
+import {
+    genericRangeTransitionAddonVetoApplies,
+    resolveHighwayLifecycleManagementAuthority,
+    resolveHighwayProtectedPyramidAddonCount
+} from "../highway-core/highway-lifecycle-authority";
+import { evaluateHighwayLifecycleProtectedPyramidAddon } from "./highway-lifecycle-pyramid-addon";
 
 function withAddonMode<T extends V2AddOnPolicyResult>(result: T, addonMode: V2AddOnPolicyResult["addonMode"]): T {
     return { ...result, addonMode: addonMode ?? "NONE" };
-}
-
-/** RANGE ledger positions must not use Highway defensive-addon bypass paths. */
-function isRangeHeldPositionForHighwayAddon(
-    pos: Readonly<{ regimeAtEntry?: string; entrySemantic?: string; isHighwayLineage?: boolean }> | null | undefined
-): boolean {
-    if (!pos) return false;
-    if (pos.regimeAtEntry === "RANGE") return true;
-    if (resolveHighwayLineageFromOpenPosition(pos)) return false;
-    const sem = String(pos.entrySemantic ?? "").toUpperCase();
-    return sem.includes("RANGE");
 }
 
 function evaluateV2AddOnPolicyCore(args: EvaluateV2AddOnPolicyArgs): V2AddOnPolicyResult {
@@ -312,6 +305,94 @@ function evaluateV2AddOnPolicyCore(args: EvaluateV2AddOnPolicyArgs): V2AddOnPoli
         }, pnlPct <= 0 ? "CONFIRMED_ADVERSE_ADDON" : "PYRAMIDING");
     }
 
+    const highwayLifecycle = resolveHighwayLifecycleManagementAuthority({
+        position: sameSidePosition,
+        isAddOn
+    });
+
+    const isRangeToTrendExceptionEarly =
+        (judgment.regime_final === "RANGE" || judgment.regime_final === "TREND") &&
+        judgment.transitionPhase === "RANGE_TO_TREND" &&
+        hasSameSidePosition &&
+        !hasOppositeSidePosition &&
+        pnlPct > 0 &&
+        !shockLockish;
+    const transitionPhaseEarly = judgment.transitionPhase || "NONE";
+    const isTransitionBlockedEarly =
+        judgment.regime_final === "TRANSITION" ||
+        (transitionPhaseEarly !== "NONE" && !isRangeToTrendExceptionEarly);
+    const rangeMidBlockedEarly = judgment.rangePhase === "MID";
+    const genericRangeTransitionVetoApplied =
+        genericRangeTransitionAddonVetoApplies(highwayLifecycle.active) &&
+        (isTransitionBlockedEarly || rangeMidBlockedEarly);
+
+    if (highwayLifecycle.active && isAddOn && sameSidePosition) {
+        const adverseAddonCount = Math.max(0, Number(sameSidePosition.adverseAddonCount ?? 0));
+        const addonCount = Math.max(0, Number(sameSidePosition.addonCount ?? 0));
+        const defensiveAuthorityActive = pnlPct <= 0;
+        const protectedPyramidAddonCount = resolveHighwayProtectedPyramidAddonCount(sameSidePosition);
+        const pyramidAuthorityActive = pnlPct > 0 && protectedPyramidAddonCount === 0;
+
+        console.info(
+            JSON.stringify({
+                event: "V2_HIGHWAY_LIFECYCLE_AUTHORITY_PROOF",
+                symbol: String(args.symbol),
+                side,
+                management_authority: highwayLifecycle.managementAuthority,
+                lifecycle_stage: highwayLifecycle.stage,
+                lifecycle_stage_before: highwayLifecycle.stage,
+                lifecycle_stage_after: highwayLifecycle.stage,
+                lifecycle_stage_source: highwayLifecycle.stageSource,
+                initial_margin_equity_fraction: highwayLifecycle.initialMarginEquityFraction,
+                defensive_margin_equity_fraction: highwayLifecycle.defensiveMarginEquityFraction,
+                pyramid_margin_equity_fraction: highwayLifecycle.pyramidMarginEquityFraction,
+                adverseAddonCount,
+                addonCount,
+                highway_pyramid_addon_count: protectedPyramidAddonCount,
+                pnlPct,
+                generic_range_transition_veto_applied: genericRangeTransitionVetoApplied,
+                defensive_authority_active: defensiveAuthorityActive,
+                pyramid_authority_active: pyramidAuthorityActive,
+                ts: Date.now()
+            })
+        );
+        if (defensiveAuthorityActive) {
+            const adverseBase: V2AddOnPolicyResult = {
+                action: "ADDON_WATCH",
+                allowed: false,
+                reason: "SAME_SIDE_POSITION_WATCH_RECHECK",
+                addOnEligible: false,
+                isInitial,
+                isAddOn,
+                side,
+                currentStage,
+                hasSameSidePosition,
+                hasOppositeSidePosition,
+                marketRegime: judgment.regime_final,
+                marketSubtype: judgment.subtype,
+                shockPhase: judgment.shockPhase,
+                rangePhase: judgment.rangePhase,
+                trendPhase: judgment.trendPhase,
+                transitionPhase: judgment.transitionPhase,
+                qualityScore,
+                reviewingTicks,
+                pnlPct,
+                boxPos,
+                emaGap,
+                trendWeaknessScore,
+                rangeConfidence,
+                breakevenStopRequired,
+                breakevenStopConfirmed,
+                breakevenStopPrice,
+                evidence: "highway_lifecycle_defensive_adverse_stage"
+            };
+            return withAddonMode(
+                evaluateConfirmedAdverseAddOn(args, adverseBase),
+                "CONFIRMED_ADVERSE_ADDON"
+            );
+        }
+    }
+
     const isRangeToTrendException =
         (judgment.regime_final === "RANGE" || judgment.regime_final === "TREND") &&
         judgment.transitionPhase === "RANGE_TO_TREND" &&
@@ -325,62 +406,7 @@ function evaluateV2AddOnPolicyCore(args: EvaluateV2AddOnPolicyArgs): V2AddOnPoli
         judgment.regime_final === "TRANSITION" ||
         (transitionPhase !== "NONE" && !isRangeToTrendException);
 
-    const heldHighwayTrendPosition =
-        hasSameSidePosition &&
-        sameSidePosition != null &&
-        resolveHighwayLineageFromOpenPosition(sameSidePosition) &&
-        !isRangeHeldPositionForHighwayAddon(sameSidePosition);
-
-    if (heldHighwayTrendPosition && pnlPct <= 0) {
-        const adverseBase: V2AddOnPolicyResult = {
-            action: "ADDON_WATCH",
-            allowed: false,
-            reason: "SAME_SIDE_POSITION_WATCH_RECHECK",
-            addOnEligible: false,
-            isInitial,
-            isAddOn,
-            side,
-            currentStage,
-            hasSameSidePosition,
-            hasOppositeSidePosition,
-            marketRegime: judgment.regime_final,
-            marketSubtype: judgment.subtype,
-            shockPhase: judgment.shockPhase,
-            rangePhase: judgment.rangePhase,
-            trendPhase: judgment.trendPhase,
-            transitionPhase: judgment.transitionPhase,
-            qualityScore,
-            reviewingTicks,
-            pnlPct,
-            boxPos,
-            emaGap,
-            trendWeaknessScore,
-            rangeConfidence,
-            breakevenStopRequired,
-            breakevenStopConfirmed,
-            breakevenStopPrice,
-            evidence: "highway_adverse_before_transition_gate"
-        };
-        const highwayAdverseFirst = evaluateConfirmedAdverseAddOn(args, adverseBase);
-        if (highwayAdverseFirst.allowed) {
-            console.info(
-                JSON.stringify({
-                    event: "V2_HIGHWAY_ADVERSE_ADDON_PRIORITY_PROOF",
-                    symbol: String(args.symbol),
-                    side,
-                    bypassed_reason: "TRANSITION_ADDON_FORBIDDEN",
-                    would_transition_block: isTransitionBlocked,
-                    transition_phase: transitionPhase,
-                    addon_reason: highwayAdverseFirst.reason,
-                    pnl_pct: pnlPct,
-                    ts: Date.now()
-                })
-            );
-            return withAddonMode(highwayAdverseFirst, "CONFIRMED_ADVERSE_ADDON");
-        }
-    }
-
-    if (isTransitionBlocked) {
+    if (genericRangeTransitionAddonVetoApplies(highwayLifecycle.active) && isTransitionBlocked) {
         return {
             action: "ADDON_FORBIDDEN",
             allowed: false,
@@ -411,7 +437,7 @@ function evaluateV2AddOnPolicyCore(args: EvaluateV2AddOnPolicyArgs): V2AddOnPoli
             evidence: "transition_addon_forbidden"
         };
     }
-    if (judgment.rangePhase === "MID") {
+    if (genericRangeTransitionAddonVetoApplies(highwayLifecycle.active) && judgment.rangePhase === "MID") {
         return {
             action: "ADDON_FORBIDDEN",
             allowed: false,
@@ -474,6 +500,64 @@ function evaluateV2AddOnPolicyCore(args: EvaluateV2AddOnPolicyArgs): V2AddOnPoli
             addonBlockedReason: "QUALITY_NOT_MET",
             evidence: "pyramiding_quality_score_too_low"
         }, "PYRAMIDING");
+    }
+
+    if (highwayLifecycle.active && isAddOn && pnlPct > 0 && sameSidePosition) {
+        const protectedPyramidAddonCount = resolveHighwayProtectedPyramidAddonCount(sameSidePosition);
+        if (protectedPyramidAddonCount > 0) {
+            return withAddonMode(
+                {
+                    action: "ADDON_FORBIDDEN",
+                    allowed: false,
+                    reason: "CURRENT_STAGE_LIMIT",
+                    addOnEligible: false,
+                    isInitial,
+                    isAddOn,
+                    side,
+                    currentStage,
+                    hasSameSidePosition,
+                    hasOppositeSidePosition,
+                    marketRegime: judgment.regime_final,
+                    marketSubtype: judgment.subtype,
+                    shockPhase: judgment.shockPhase,
+                    rangePhase: judgment.rangePhase,
+                    trendPhase: judgment.trendPhase,
+                    transitionPhase: judgment.transitionPhase,
+                    qualityScore,
+                    reviewingTicks,
+                    pnlPct,
+                    boxPos,
+                    emaGap,
+                    trendWeaknessScore,
+                    rangeConfidence,
+                    breakevenStopRequired,
+                    breakevenStopConfirmed,
+                    breakevenStopPrice,
+                    addonBlockedReason: "HIGHWAY_PROTECTED_PYRAMID_ALREADY_EXECUTED",
+                    evidence: "highway_lifecycle_protected_pyramid_already_executed"
+                },
+                "PYRAMIDING"
+            );
+        }
+        return evaluateHighwayLifecycleProtectedPyramidAddon(args, highwayLifecycle, {
+            side,
+            isInitial,
+            isAddOn,
+            currentStage,
+            hasSameSidePosition,
+            hasOppositeSidePosition,
+            qualityScore,
+            reviewingTicks,
+            pnlPct,
+            boxPos,
+            emaGap,
+            trendWeaknessScore,
+            rangeConfidence,
+            breakevenStopRequired,
+            breakevenStopConfirmed,
+            breakevenStopPrice,
+            sameSidePosition
+        });
     }
 
     if (pnlPct <= 0) {
@@ -790,25 +874,6 @@ function evaluateV2AddOnPolicyCore(args: EvaluateV2AddOnPolicyArgs): V2AddOnPoli
         const entryPrice = sameSidePosition?.entryPrice ?? 0;
         const currentPrice = Number(snapshot.lastPrice ?? entryPrice);
 
-        // Check Highway Lineage
-        const isHighway =
-            sameSidePosition?.isHighwayLineage === true ||
-            sameSidePosition?.entrySemantic === "HIGHWAY" ||
-            sameSidePosition?.entrySemantic === "HIGHWAY_CORE" ||
-            sameSidePosition?.v2EntryReason === "HIGHWAY_CORE_ENTRY" ||
-            sameSidePosition?.v2EntryReason === "HIGHWAY_CORE_TREND_PROBE" ||
-            (execution?.metadata as Record<string, unknown> | undefined)?.isHighwayLineage === true ||
-            (execution as any)?.entrySemantic === "HIGHWAY" ||
-            (execution as any)?.entrySemantic === "HIGHWAY_CORE";
-
-        const pyramidAppliedLeverage = Math.max(
-            1,
-            Number(sameSidePosition?.leverage ?? (execution as { appliedLeverage?: number })?.appliedLeverage ?? 10)
-        );
-        const targetPyramidNotionalUsdt = isHighway
-            ? highwayMarginTargetToNotionalUsdt(accountEquityUsd * 0.25, pyramidAppliedLeverage)
-            : accountEquityUsd * 0.25;
-
         // Opposing Threat Guards (HTF polarity mismatch / reversal / stabilized opposing shock)
         const htfOpposing =
             (side === "long" && (judgment.trendPhase === "DOWN" || (judgment.subtype as string) === "HTF_BEARISH")) ||
@@ -883,267 +948,6 @@ function evaluateV2AddOnPolicyCore(args: EvaluateV2AddOnPolicyArgs): V2AddOnPoli
             isProtectiveStopRegistered: stopAuthority.isProtectiveStopRegistered,
             ts: Date.now()
         }));
-
-        // 2. Highway Specific 2-Track Continuation Evaluation
-        if (isHighway) {
-            // (a) Current position unrealized profit >= +50 USDT
-            const currentPosProfitUsdt =
-                (side === "long" && entryPrice > 0)
-                    ? sizeUsd * (currentPrice - entryPrice) / entryPrice
-                    : (side === "short" && entryPrice > 0)
-                        ? sizeUsd * (entryPrice - currentPrice) / entryPrice
-                        : 0;
-
-            if (currentPosProfitUsdt < 50) {
-                return withAddonMode({
-                    action: "ADDON_WATCH",
-                    allowed: false,
-                    reason: "PROFIT_BUFFER_INSUFFICIENT",
-                    addOnEligible: false,
-                    isInitial,
-                    isAddOn,
-                    side,
-                    currentStage,
-                    hasSameSidePosition,
-                    hasOppositeSidePosition,
-                    marketRegime: judgment.regime_final,
-                    marketSubtype: judgment.subtype,
-                    shockPhase: judgment.shockPhase,
-                    rangePhase: judgment.rangePhase,
-                    trendPhase: judgment.trendPhase,
-                    transitionPhase: judgment.transitionPhase,
-                    qualityScore,
-                    reviewingTicks,
-                    pnlPct,
-                    boxPos,
-                    emaGap,
-                    trendWeaknessScore,
-                    rangeConfidence,
-                    breakevenStopRequired,
-                    breakevenStopConfirmed,
-                    breakevenStopPrice,
-                    lockedProfitUsdt: Math.round(currentPosProfitUsdt * 100) / 100,
-                    addonBlockedReason: "PYRAMID_PROFIT_BELOW_50_USDT",
-                    evidence: "pyramid_profit_below_50_usdt"
-                }, "PYRAMIDING");
-            }
-
-            // (b) Continuation Mode Classification
-            const execMeta = (execution?.metadata as Record<string, unknown> | undefined) ?? {};
-            // retestTouched 단독은 허용 금지. retestRejected와 함께여야만 pullback 인정.
-            const metaSources = [
-                execMeta,
-                judgment as unknown as Record<string, unknown>,
-                snapshot as Record<string, unknown>
-            ];
-            const metaFlagTrue = (key: string): boolean =>
-                metaSources.some((src) => src != null && src[key] === true);
-            const retestConfirmed =
-                metaFlagTrue("retestTouched") && metaFlagTrue("retestRejected");
-            const isPullbackMode =
-                metaFlagTrue("pullbackConfirmed") ||
-                metaFlagTrue("supportHoldConfirmed") ||
-                metaFlagTrue("supportBounceConfirmed") ||
-                retestConfirmed;
-
-            const isMomentumMode =
-                execMeta.highwayContinuationConfirmed === true ||
-                execMeta.breakoutContinuationConfirmed === true ||
-                execMeta.strongMomentumConfirmed === true ||
-                (judgment.subtype as string) === "HIGHWAY_CONTINUATION" ||
-                (judgment.subtype as string) === "BREAKOUT_CONTINUATION" ||
-                (judgment.subtype as string) === "TREND_MOMENTUM" ||
-                (execution as any)?.entrySemantic === "HIGHWAY_CONTINUATION" ||
-                execMeta.momentumContinuationAllowed === true;
-
-            if (!isPullbackMode && !isMomentumMode) {
-                return withAddonMode({
-                    action: "ADDON_WATCH",
-                    allowed: false,
-                    reason: "MOMENTUM_AUTHORITY_NOT_CONFIRMED",
-                    addOnEligible: false,
-                    isInitial,
-                    isAddOn,
-                    side,
-                    currentStage,
-                    hasSameSidePosition,
-                    hasOppositeSidePosition,
-                    marketRegime: judgment.regime_final,
-                    marketSubtype: judgment.subtype,
-                    shockPhase: judgment.shockPhase,
-                    rangePhase: judgment.rangePhase,
-                    trendPhase: judgment.trendPhase,
-                    transitionPhase: judgment.transitionPhase,
-                    qualityScore,
-                    reviewingTicks,
-                    pnlPct,
-                    boxPos,
-                    emaGap,
-                    trendWeaknessScore,
-                    rangeConfidence,
-                    breakevenStopRequired,
-                    breakevenStopConfirmed,
-                    breakevenStopPrice,
-                    addonBlockedReason: "PLAIN_TREND_PHASE_INSUFFICIENT",
-                    evidence: "plain_trend_phase_insufficient_for_pyramid"
-                }, "PYRAMIDING");
-            }
-
-            // (c) Sizing, Weighted Avg Entry, and Net Protected Profit Calculation
-            const atr = Number(snapshot.atr || (snapshot.volatilityProxyDiag ?? 0));
-            const stopDistance = atr * 2.2;
-            const addonNotionalUsdt = Math.min(
-                targetPyramidNotionalUsdt,
-                Math.max(0, symbolMaxNotional - currentSymbolNotionalUsd),
-                Math.max(0, globalMaxNotional - currentGlobalNotionalUsd)
-            );
-            const totalProjectedNotionalUsdt = sizeUsd + addonNotionalUsdt;
-            // Weighted average entry (qty-weighted): (N1+N2) / (N1/P1 + N2/P2)
-            const N1 = sizeUsd;
-            const N2 = addonNotionalUsdt;
-            const P1 = entryPrice;
-            const P2 = currentPrice;
-            const qtyDenominator = (P1 > 0 ? N1 / P1 : 0) + (P2 > 0 ? N2 / P2 : 0);
-            const projectedWeightedAvgEntry =
-                qtyDenominator > 0 ? (N1 + N2) / qtyDenominator : entryPrice;
-
-            // Projected Stop Price: uses active exchange stop or trailing stop
-            const projectedStopPrice = side === "long"
-                ? (stopAuthority.activeStopPrice ?? (currentPrice - stopDistance))
-                : (stopAuthority.activeStopPrice ?? (currentPrice + stopDistance));
-
-            const grossProtectedProfitUsdt = side === "long"
-                ? (projectedWeightedAvgEntry > 0 ? totalProjectedNotionalUsdt * (projectedStopPrice - projectedWeightedAvgEntry) / projectedWeightedAvgEntry : 0)
-                : (projectedWeightedAvgEntry > 0 ? totalProjectedNotionalUsdt * (projectedWeightedAvgEntry - projectedStopPrice) / projectedWeightedAvgEntry : 0);
-
-            // Friction: 0.05% entry fee + 0.05% exit fee + 0.02% slippage = 0.12%
-            const totalFrictionUsdt = totalProjectedNotionalUsdt * 0.0012;
-            const netProtectedProfitUsdt = grossProtectedProfitUsdt - totalFrictionUsdt;
-
-            // Must have verified active OKX stop locking profit
-            const hasActiveStopLock = stopAuthority.isStopLockingProfit && stopAuthority.activeStopPrice !== null;
-            if (!hasActiveStopLock) {
-                return withAddonMode({
-                    action: "ADDON_WATCH",
-                    allowed: false,
-                    reason: "BREAKEVEN_STOP_NOT_CONFIRMED",
-                    addOnEligible: false,
-                    isInitial,
-                    isAddOn,
-                    side,
-                    currentStage,
-                    hasSameSidePosition,
-                    hasOppositeSidePosition,
-                    marketRegime: judgment.regime_final,
-                    marketSubtype: judgment.subtype,
-                    shockPhase: judgment.shockPhase,
-                    rangePhase: judgment.rangePhase,
-                    trendPhase: judgment.trendPhase,
-                    transitionPhase: judgment.transitionPhase,
-                    qualityScore,
-                    reviewingTicks,
-                    pnlPct,
-                    boxPos,
-                    emaGap,
-                    trendWeaknessScore,
-                    rangeConfidence,
-                    breakevenStopRequired,
-                    breakevenStopConfirmed,
-                    breakevenStopPrice,
-                    addonBlockedReason: !stopAuthority.isProtectiveStopRegistered ? "PROTECTIVE_STOP_NOT_REGISTERED" : "ACTUAL_STOP_NOT_LOCKING_PROFIT",
-                    evidence: "active_exchange_stop_not_locking_profit"
-                }, "PYRAMIDING");
-            }
-
-            // Net Protected Profit must be >= +40 USDT
-            if (netProtectedProfitUsdt < 40) {
-                return withAddonMode({
-                    action: "ADDON_WATCH",
-                    allowed: false,
-                    reason: "PROFIT_BUFFER_INSUFFICIENT",
-                    addOnEligible: false,
-                    isInitial,
-                    isAddOn,
-                    side,
-                    currentStage,
-                    hasSameSidePosition,
-                    hasOppositeSidePosition,
-                    marketRegime: judgment.regime_final,
-                    marketSubtype: judgment.subtype,
-                    shockPhase: judgment.shockPhase,
-                    rangePhase: judgment.rangePhase,
-                    trendPhase: judgment.trendPhase,
-                    transitionPhase: judgment.transitionPhase,
-                    qualityScore,
-                    reviewingTicks,
-                    pnlPct,
-                    boxPos,
-                    emaGap,
-                    trendWeaknessScore,
-                    rangeConfidence,
-                    breakevenStopRequired,
-                    breakevenStopConfirmed,
-                    breakevenStopPrice: projectedStopPrice,
-                    lockedProfitUsdt: Math.round(netProtectedProfitUsdt * 100) / 100,
-                    addonBlockedReason: "NET_PROTECTED_PROFIT_BELOW_40_USDT",
-                    evidence: "net_protected_profit_below_40_usdt"
-                }, "PYRAMIDING");
-            }
-
-            const pyramidReason = isPullbackMode
-                ? "HIGHWAY_PULLBACK_PYRAMID_ALLOWED"
-                : "HIGHWAY_MOMENTUM_CONTINUATION_PYRAMID_ALLOWED";
-            const pyramidEvidence = isPullbackMode
-                ? "highway_pullback_pyramid_allowed"
-                : "highway_momentum_continuation_pyramid_allowed";
-
-            return withAddonMode({
-                action: "ADDON_ALLOWED",
-                allowed: true,
-                reason: pyramidReason,
-                addOnEligible: true,
-                isInitial,
-                isAddOn,
-                side,
-                currentStage,
-                hasSameSidePosition,
-                hasOppositeSidePosition,
-                marketRegime: judgment.regime_final,
-                marketSubtype: judgment.subtype,
-                shockPhase: judgment.shockPhase,
-                rangePhase: judgment.rangePhase,
-                trendPhase: judgment.trendPhase,
-                transitionPhase: judgment.transitionPhase,
-                qualityScore,
-                reviewingTicks,
-                pnlPct,
-                boxPos,
-                emaGap,
-                trendWeaknessScore,
-                rangeConfidence,
-                lockedProfitUsdt: Math.round(netProtectedProfitUsdt * 100) / 100,
-                availableRiskBudgetUsdt: Math.round((netProtectedProfitUsdt - 40) * 100) / 100,
-                addonMaxNotionalUsdt: addonNotionalUsdt,
-                requestedAddonNotionalUsdt: addonNotionalUsdt,
-                breakevenStopRequired,
-                breakevenStopConfirmed,
-                breakevenStopPrice: projectedStopPrice,
-                thesisValid: true,
-                sameSideConfirmation: true,
-                priceDistancePassed: true,
-                riskProjection: {
-                    projectedTotalNotionalUsdt: Math.round(totalProjectedNotionalUsdt * 100) / 100,
-                    projectedWeightedAvgEntry: Math.round(projectedWeightedAvgEntry * 100) / 100,
-                    projectedStopPrice: Math.round(projectedStopPrice * 100) / 100,
-                    projectedGrossProtectedProfitAtStopUsdt: Math.round(grossProtectedProfitUsdt * 100) / 100,
-                    projectedNetProtectedProfitAtStopUsdt: Math.round(netProtectedProfitUsdt * 100) / 100,
-                    riskBeforeAddonUsdt: Math.round(currentPosProfitUsdt * 100) / 100,
-                    riskBudgetUsdt: Math.round(netProtectedProfitUsdt * 100) / 100,
-                    riskBudgetAllowedNotional: Math.round(addonNotionalUsdt * 100) / 100
-                },
-                evidence: pyramidEvidence
-            }, "PYRAMIDING");
-        }
 
         // --- Generic (Non-Highway) TREND Profit-Funded Pyramid Fallback ---
         let lockedProfitUsdt = 0;

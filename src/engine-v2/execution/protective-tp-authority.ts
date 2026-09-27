@@ -1,4 +1,8 @@
 import type { MarketRegime } from "../../strategy/market-regime-detector";
+import {
+    resolveHighwayLifecycleProtectiveTpReason,
+    type HighwayLifecycleStage
+} from "../highway-core/highway-lifecycle-authority";
 
 export type ProtectiveTpMode = "TREND_FULL_TP" | "RANGE_TP1_PARTIAL" | "RANGE_TP2_POST_FILL" | "RANGE_TP2_BACKSTOP" | "NONE";
 export type CanonicalTpPhase = "TP1_PENDING" | "TP2_PENDING" | "FULL_TP_PENDING" | "NONE";
@@ -36,6 +40,7 @@ export function resolveProtectiveTpPlan(input: Readonly<{
     takeProfitPlan?: { tp1?: number | null; tp2?: number | null } | null;
     tp1Filled?: boolean;
     partialExitStage?: number | null;
+    highwayLifecycleStage?: HighwayLifecycleStage | null;
 }>): ProtectiveTpPlanResolution {
     const isHighway =
         input.isHighwayLineage === true ||
@@ -106,7 +111,7 @@ export function resolveProtectiveTpPlan(input: Readonly<{
                 exchangeTpPrice: null,
                 exchangeTpSource: "none",
                 fullPositionTpRequired: false,
-                reason: "HIGHWAY_LIFECYCLE_PROTECTIVE_TP_DEFERRED"
+                reason: resolveHighwayLifecycleProtectiveTpReason(input.highwayLifecycleStage ?? null)
             };
         }
         if (validTp1 != null) {

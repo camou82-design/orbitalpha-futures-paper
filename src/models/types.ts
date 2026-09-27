@@ -1116,6 +1116,12 @@ export type PaperOpenPositionRecord = {
   addonCount?: number;
   /** CONFIRMED_ADVERSE_ADDON fills completed (max 1). */
   adverseAddonCount?: number;
+  /** Committed Highway lifecycle stage (monotonic execution history). */
+  highwayLifecycleStage?: "HIGHWAY_INITIAL" | "HIGHWAY_DEFENSIVE_ADVERSE" | "HIGHWAY_PROTECTED_PYRAMID";
+  highwayDefensiveAddonExecuted?: boolean;
+  highwayProtectedPyramidExecuted?: boolean;
+  /** Protected profit pyramid fills only (not generic addonCount). */
+  highwayPyramidAddonCount?: number;
   /** Candle ts when position first entered adverse territory. */
   adverseMoveAnchorCandleTs?: number;
   /** Candle ts anchor after last adverse addon fill. */

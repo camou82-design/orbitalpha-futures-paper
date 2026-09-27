@@ -120,6 +120,10 @@ export interface EngineV2Position {
     /** Candle ts of last fresh adverse confirmation (post-fill anchor). */
     lastAdverseConfirmationCandleTs?: number;
     addonCount?: number;
+    highwayLifecycleStage?: "HIGHWAY_INITIAL" | "HIGHWAY_DEFENSIVE_ADVERSE" | "HIGHWAY_PROTECTED_PYRAMID";
+    highwayDefensiveAddonExecuted?: boolean;
+    highwayProtectedPyramidExecuted?: boolean;
+    highwayPyramidAddonCount?: number;
     /** V2 진입 사유 - probe TP/exit 단계에서 진입 유형 판별에 사용. */
     v2EntryReason?: string;
     isHighwayLineage?: boolean;
@@ -280,6 +284,10 @@ export interface LegacyPositionAdapter {
     adverseMoveAnchorCandleTs?: number;
     lastAdverseConfirmationCandleTs?: number;
     addonCount?: number;
+    highwayLifecycleStage?: "HIGHWAY_INITIAL" | "HIGHWAY_DEFENSIVE_ADVERSE" | "HIGHWAY_PROTECTED_PYRAMID";
+    highwayDefensiveAddonExecuted?: boolean;
+    highwayProtectedPyramidExecuted?: boolean;
+    highwayPyramidAddonCount?: number;
     /** Blocker 4-15: Flag set when manual increase rebase detects structural invalidation is already breached */
     structureBreached?: boolean;
     slProtectionSatisfied?: boolean;
@@ -662,6 +670,10 @@ export interface V2BridgePosition {
     leverage?: number;
     addonCount?: number;
     adverseAddonCount?: number;
+    highwayLifecycleStage?: "HIGHWAY_INITIAL" | "HIGHWAY_DEFENSIVE_ADVERSE" | "HIGHWAY_PROTECTED_PYRAMID";
+    highwayDefensiveAddonExecuted?: boolean;
+    highwayProtectedPyramidExecuted?: boolean;
+    highwayPyramidAddonCount?: number;
     adverseMoveAnchorCandleTs?: number;
     lastAdverseConfirmationCandleTs?: number;
     /** Blocker 4-15: Flag set when manual increase rebase detects structural invalidation is already breached */
