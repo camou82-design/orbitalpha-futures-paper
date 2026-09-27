@@ -75,28 +75,8 @@ function classifyRangePhase(input: EngineV2Input, symbol: string): { phase: Mark
     let e20Slope = typeof sn.ema20Slope === "number" ? sn.ema20Slope : 0;
     let source = "snapshot";
     // Fallback if snapshot slopes are zero or null
-    console.info(JSON.stringify({
-        event: "V2_SLOPE_FALLBACK_CHECK_PROOF",
-        symbol: input.symbol,
-        bhSlope_snap: bhSlope,
-        blSlope_snap: blSlope,
-        candles_length: sn.candles ? sn.candles.length : 0,
-        eligible: bhSlope === 0 && blSlope === 0 && sn.candles && sn.candles.length >= 40 ? true : false
-    }));
-
     if (bhSlope === 0 && blSlope === 0 && sn.candles && sn.candles.length >= 40) {
         const computed = computeSlopesFromCandles(sn.candles);
-        console.info(JSON.stringify({
-            event: "V2_SLOPE_FALLBACK_COMPUTED_PROOF",
-            symbol: input.symbol,
-            computed: computed ? {
-                bhSlope: computed.bhSlope,
-                blSlope: computed.blSlope,
-                rcSlope: computed.rcSlope,
-                e20Slope: computed.e20Slope,
-                windowSize: computed.windowSize
-            } : null
-        }));
         if (computed) {
             bhSlope = computed.bhSlope;
             blSlope = computed.blSlope;
@@ -1289,20 +1269,6 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
     const mixedBreakoutState = (sn.breakoutFailureRate || 0) > 0.4 && (sn.breakoutFailureRate || 0) < 0.7;
     const emaExpansionWeak = Math.abs(sn.emaGap || 0) > 0.0003 && (sn.trendWeaknessScore || 0) > 0.6;
 
-    // Legacy diagnostic computation (for observation / comparison proof only)
-    const midRange = rangeScore > 0.4 && rangeScore < 0.7;
-    const midTrend = trendScore > 0.4 && trendScore < 0.7;
-    const structuralConflict = mixedBreakoutState || boxCohesionCollapse;
-
-    let legacy_v2_recomputed_regime: MarketJudgmentOutput["regime"] = "NO_TRADE";
-    if (midRange && midTrend && structuralConflict) {
-        legacy_v2_recomputed_regime = "TRANSITION";
-    } else if (rangeScore > 0.6) {
-        legacy_v2_recomputed_regime = "RANGE";
-    } else if (trendScore > 0.7 && (sn.trendWeaknessScore || 0) < 0.5) {
-        legacy_v2_recomputed_regime = "TREND";
-    }
-
     // Canonical Regime Authority (P0 Canonical Regime Authority Unification)
     const canonicalRegime: MarketJudgmentOutput["regime"] =
         sn.canonicalRegime === "RANGE" || sn.canonicalRegime === "TREND" || sn.canonicalRegime === "NO_TRADE"
@@ -1368,11 +1334,8 @@ export function detectMarketRegime(input: EngineV2Input): MarketJudgmentOutput {
         canonical_range_confidence: canonicalRangeConfidence,
         canonical_trend_weakness_score: canonicalTrendWeaknessScore,
         canonical_is_ambiguous: canonicalIsAmbiguous,
-        legacy_v2_recomputed_regime: legacy_v2_recomputed_regime,
         legacy_v2_recomputed_trend_score: trendScore,
-        authority_regime_final: regime_final,
-        regime_override_applied: canonicalRegime !== legacy_v2_recomputed_regime,
-        regime_override_reason: canonicalRegime !== legacy_v2_recomputed_regime ? `canonical_${canonicalRegime}_overrides_legacy_${legacy_v2_recomputed_regime}` : "none"
+        authority_regime_final: regime_final
     }));
 
     const htfPack = input.htf_candles ?? input.snapshot.htf_candles ?? {};

@@ -20,14 +20,6 @@ export function deriveTrendSideCandidate(
     return "none";
 }
 
-/** Typed alias for index.ts locals expecting EngineV2Side. */
-export function deriveTrendSideCandidateAsEngineSide(
-    directionalShockState: string | null | undefined,
-    emaGap: number
-): EngineV2Side {
-    return deriveTrendSideCandidate(directionalShockState, emaGap);
-}
-
 export type TrendCandidateDirectionSource = "REGIME_DIRECTION_TREND_UP" | "REGIME_DIRECTION_TREND_DOWN" | "EMA_GAP_FALLBACK";
 
 export function resolveTrendExecutionCandidateDirection(args: Readonly<{

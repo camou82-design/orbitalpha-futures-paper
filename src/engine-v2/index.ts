@@ -16,7 +16,7 @@ import { MarketSymbol, classifyRangeZone, rangeZoneLowerExtreme, rangeZoneUpperE
 import { evaluateBtcShortMacroBullGate, evaluateEthShortLocationRrGate } from "./market-judgment/short-authority-gates";
 import { evaluateSameSideLossReentryGate } from "./state/loss-reentry-gate";
 import { applyV2ExitAuthorityInvariants, isExplicitTerminalExitReason } from "./exit/exit-authority-invariant";
-import { resolveFinalExitAuthority, buildFinalExitAuthorityProof } from "./exit/final-exit-authority";
+import { resolveFinalExitAuthority } from "./exit/final-exit-authority";
 import { evaluateTerminalReentryBarrier, buildTerminalReentryBarrierProof, resolveTerminalBarrierContext } from "./lifecycle/terminal-reentry-barrier";
 import { emitLiveExposureAuthorityProof, resolveLiveExposureAuthority } from "./live-account/exposure-authority";
 import { resolveAccountOpenRiskAuthority } from "./risk-sizing/account-open-risk";
@@ -2050,7 +2050,6 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         regime: judgment.regime,
         routerExecutor: activeEngineRouting
     });
-    const marketMode = finalRegimeExecutionAuthority.market_mode;
     const hasFinalTrendExecutionAuthority = finalRegimeExecutionAuthority.has_final_trend_execution_authority;
     const rangeToTrendPromotionApplicable = finalRegimeExecutionAuthority.range_to_trend_promotion_applicable;
     const qualityScore = Number(input.snapshot?.qualityScore ?? 0);
@@ -2408,7 +2407,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const rangePromotableContext = rangeSideAligned || rangeEdgeExtreme;
     const rangeContextActive =
         rangeToTrendPromotionApplicable &&
-        (activeEngineRouting === "RANGE" || marketMode === "RANGE");
+        (activeEngineRouting === "RANGE" || finalRegimeExecutionAuthority.regime_final === "RANGE");
     const shockDownActive = shock === "DOWN";
     const shockUpActive = shock === "UP";
     const shockDownRangeMidWatch =
@@ -2667,7 +2666,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 directional_shock_state: shock,
                 crash_state: crashState || null,
                 pump_state: pumpStateResolved || null,
-                market_mode: marketMode,
+                market_mode: finalRegimeExecutionAuthority.regime_final,
                 active_engine_routing: activeEngineRouting,
                 boxPos,
                 zone,
@@ -2701,7 +2700,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 directional_shock_state: shock,
                 crash_state: crashState || null,
                 pump_state: pumpStateResolved || null,
-                market_mode: marketMode,
+                market_mode: finalRegimeExecutionAuthority.regime_final,
                 active_engine_routing: activeEngineRouting,
                 boxPos,
                 zone,
@@ -2713,7 +2712,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 directional_shock_state: shock,
                 crash_state: crashState || null,
                 pump_state: pumpStateResolved || null,
-                market_mode: marketMode,
+                market_mode: finalRegimeExecutionAuthority.regime_final,
                 active_engine_routing: activeEngineRouting,
                 boxPos,
                 zone,
@@ -2823,7 +2822,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     directional_shock_state: shock,
                     crash_state: crashState || null,
                     pump_state: pumpStateResolved || null,
-                    market_mode: marketMode,
+                    market_mode: finalRegimeExecutionAuthority.regime_final,
                     active_engine_routing: activeEngineRouting,
                     boxPos,
                     zone,
@@ -4228,7 +4227,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 } else if (
                     zone === "upper" &&
                     trendSideCandidate === "long" &&
-                    marketMode === "RANGE"
+                    finalRegimeExecutionAuthority.regime_final === "RANGE"
                 ) {
                     const upperLongFallbackEval = evaluateUpperBreakoutLongConfirmed({
                         ...rangeBoundaryCtx,
@@ -4257,7 +4256,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     // non-RANGE execution provenance (Layer 1: exec.reason + execMeta flags).
                     !isProvenNonRangeExecutionProvenance
                 ) {
-                    if (marketMode === "RANGE" && (boxBreakSide === "none" || boxBreakSide === "UNKNOWN")) {
+                    if (finalRegimeExecutionAuthority.regime_final === "RANGE" && (boxBreakSide === "none" || boxBreakSide === "UNKNOWN")) {
                         promotionBlockReason = "TREND_PROMOTION_BLOCKED_BREAKOUT_RETEST_NOT_CONFIRMED";
                         expectedNextAction = "WAIT_FOR_BREAKOUT_RETEST_SUPPORT_CONFIRM";
                         expectedMissingCondition = "TREND_PROMOTION_BLOCKED_BREAKOUT_RETEST_NOT_CONFIRMED";
@@ -4333,7 +4332,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                     directional_shock_state: shock,
                     crash_state: crashState || null,
                     pump_state: pumpStateResolved || null,
-                    market_mode: marketMode,
+                    market_mode: finalRegimeExecutionAuthority.regime_final,
                     active_engine_routing: activeEngineRouting,
                     boxPos,
                     zone,
@@ -6445,7 +6444,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             console.info(JSON.stringify({
                 event: "V2_RANGE_SIDE_ZONE_VETO_BYPASS_PROOF",
                 symbol: String(input.symbol),
-                regime: marketMode,
+                regime: finalRegimeExecutionAuthority.regime_final,
                 market_subtype: judgment.subtype,
                 directional_shock_state: shock,
                 htf_policy: judgment.htf_entry_policy ?? "NEUTRAL_HTF_DATA_WAIT",
@@ -6651,7 +6650,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             console.info(JSON.stringify({
                 event: "V2_RANGE_SIDE_ZONE_VETO_PROOF",
                 symbol: String(input.symbol),
-                regime: marketMode,
+                regime: finalRegimeExecutionAuthority.regime_final,
                 boxPos,
                 rangeZone: zone,
                 sideCandidate: sideCandidateBeforeVeto,
@@ -10376,7 +10375,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     console.info(JSON.stringify({
         event: "V2_TREND_AUTHORITY_DIAGNOSTIC_PROOF",
         symbol: String(input.symbol),
-        market_mode: marketMode,
+        market_mode: finalRegimeExecutionAuthority.regime_final,
         active_engine_routing: activeEngineRouting,
         directional_shock_state: shock,
         risk_long_allow: riskLongAllow,
@@ -10440,7 +10439,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     console.info(JSON.stringify({
         event: "V2_AUTHORITY_PROMOTION_FINALIZER_PROOF",
         symbol: String(input.symbol),
-        market_mode: marketMode,
+        market_mode: finalRegimeExecutionAuthority.regime_final,
         judgment_regime: judgment.regime,
         judgment_regime_final: judgment.regime_final,
         active_engine_routing: activeEngineRouting,
@@ -10587,7 +10586,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     // Tier 6: Unify diagnostic suppression reasons for audit-ready transparency
     let whipsawBlocking = judgment.subtype === "WHIPSAW_SHOCK_RECHECK";
-    if (!promotionBlockReason && !v2RejectReasonAfterPromotion && finalDecision !== "ENTER" && !hardBlockPresent && (trendSideCandidate !== "none" || activeEngineRouting === "TREND" || marketMode === "TREND")) {
+    if (!promotionBlockReason && !v2RejectReasonAfterPromotion && finalDecision !== "ENTER" && !hardBlockPresent && (trendSideCandidate !== "none" || activeEngineRouting === "TREND" || finalRegimeExecutionAuthority.regime_final === "TREND")) {
         if (!trendOk) {
             if (trendWeaknessScore >= 0.5) {
                 promotionBlockReason = "TREND_PROMOTION_BLOCKED_TREND_WEAKNESS_TOO_HIGH";
@@ -11295,7 +11294,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     decision.metadata.htf_policy = judgment.htf_entry_policy ?? null;
     decision.metadata.promotion_reason = promotionReason;
     decision.metadata.decision_reason = execution.reason;
-    decision.metadata.market_mode = marketMode;
+    decision.metadata.market_mode = finalRegimeExecutionAuthority.regime_final;
     decision.metadata.box_pos = typeof boxPos === "number" && Number.isFinite(boxPos) ? boxPos : undefined;
 
     const execMetaForLineagePersist = (execution?.metadata ?? {}) as Record<string, unknown>;
