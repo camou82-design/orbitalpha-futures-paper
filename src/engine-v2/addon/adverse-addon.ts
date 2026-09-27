@@ -1,5 +1,10 @@
 import type { EvaluateV2AddOnPolicyArgs, V2AddOnPolicyResult } from "./types";
 import type { EngineV2Side } from "../types";
+import { resolveHighwayLineageFromOpenPosition } from "../highway-core/highway-lineage-authority";
+import {
+    highwayMarginTargetToNotionalUsdt,
+    MAX_ADVERSE_ADDON_EQUITY_MULTIPLE
+} from "../risk-sizing/equity-adaptive-sizing";
 
 export type V2AddonRiskProjection = Readonly<{
     projectedTotalNotionalUsdt: number;
@@ -339,7 +344,19 @@ export function evaluateConfirmedAdverseAddOn(
     const isEthSymbol = String(args.symbol ?? "").toUpperCase().replace("-SWAP", "").replace("-", "") === "ETHUSDT";
     const symbolMaxNotional = isEthSymbol ? Math.min(accountEquityUsd * 1.0, 2000) : accountEquityUsd * 1.0;
     const globalMaxNotional = accountEquityUsd * 1.5;
-    const maxAdverseAddonUsd = isEthSymbol ? 800 : accountEquityUsd * 0.25;
+    const sameSidePosition = side === "long" ? v2State.longPosition : v2State.shortPosition;
+    const appliedLeverage = Math.max(1, Number(sameSidePosition?.leverage ?? 10));
+    const isHighwayLineage =
+        resolveHighwayLineageFromOpenPosition(sameSidePosition) ||
+        (execution?.metadata as Record<string, unknown> | undefined)?.isHighwayLineage === true;
+    const maxAdverseAddonUsd = isEthSymbol
+        ? 800
+        : isHighwayLineage
+          ? highwayMarginTargetToNotionalUsdt(accountEquityUsd * 0.75 * 0.30, appliedLeverage)
+          : highwayMarginTargetToNotionalUsdt(
+                accountEquityUsd * MAX_ADVERSE_ADDON_EQUITY_MULTIPLE,
+                appliedLeverage
+            );
 
     const currentSymbolNotionalUsd = args.currentSymbolNotionalUsd || 0;
     const currentGlobalNotionalUsd = args.currentGlobalNotionalUsd || currentSymbolNotionalUsd;
@@ -359,7 +376,6 @@ export function evaluateConfirmedAdverseAddOn(
     }
 
     const policySize = maxAdverseAddonUsd;
-    const sameSidePosition = side === "long" ? v2State.longPosition : v2State.shortPosition;
     const entryPrice = Number(sameSidePosition?.entryPrice ?? 0);
     const atrVal = Number(snapshot.atr || snapshot.volatilityProxyDiag || currentPrice * 0.005);
     const riskProjection = computeAdverseAddonRiskProjection({

@@ -268,6 +268,10 @@ export function deriveExecutionAuthority(
                     typeof selector.v2_result.metadata?.entrySemantic === "string"
                         ? selector.v2_result.metadata.entrySemantic
                         : null,
+                v2EntryReason:
+                    typeof selector.v2_result.metadata?.v2EntryReason === "string"
+                        ? selector.v2_result.metadata.v2EntryReason
+                        : null,
                 promotionReason:
                     typeof selector.v2_result.metadata?.promotion_reason === "string"
                         ? selector.v2_result.metadata.promotion_reason
@@ -277,6 +281,10 @@ export function deriveExecutionAuthority(
                         ? selector.v2_result.metadata.judgment_subtype
                         : null
             }),
+        v2EntryReason:
+            useV2 && typeof selector.v2_result.metadata?.v2EntryReason === "string"
+                ? selector.v2_result.metadata.v2EntryReason
+                : undefined,
         postShockProbeEpisodeId:
             useV2 && typeof selector.v2_result.metadata?.postShockProbeEpisodeId === "string"
                 ? selector.v2_result.metadata.postShockProbeEpisodeId
@@ -354,7 +362,12 @@ export function deriveExecutionAuthorityFromEnvelope(
         profitabilityExecutableTp1Price: envelope.profitabilityExecutableTp1Price ?? undefined,
         profitabilityRawCanonicalTp1Price: envelope.profitabilityRawCanonicalTp1Price ?? undefined,
         authoritativeCandleTs: envelope.authoritativeCandleTs ?? undefined,
-        closedCandleTs: envelope.closedCandleTs ?? undefined
+        closedCandleTs: envelope.closedCandleTs ?? undefined,
+        entrySemantic:
+            typeof envelope.entrySemantic === "string" ? envelope.entrySemantic : undefined,
+        isHighwayLineage: envelope.isHighwayLineage === true,
+        v2EntryReason:
+            typeof envelope.v2EntryReason === "string" ? envelope.v2EntryReason : undefined
     };
 }
 
@@ -670,6 +683,13 @@ export function resolveSymbolDecisionEnvelope(
         selectorMismatch: selector.mismatch
     };
     const execMeta = v2Res.decision.metadata ?? {};
+    const highwayLineageForEnvelope = resolveCanonicalHighwayLineage({
+        isHighwayLineageExplicit: execMeta.isHighwayLineage === true,
+        entrySemantic: typeof execMeta.entrySemantic === "string" ? execMeta.entrySemantic : null,
+        v2EntryReason: typeof execMeta.v2EntryReason === "string" ? execMeta.v2EntryReason : null,
+        promotionReason: typeof execMeta.promotion_reason === "string" ? execMeta.promotion_reason : null,
+        judgmentSubtype: v2Res.internal.judgment.subtype ?? null
+    });
     let executionEnvelope = buildV2ExecutionAuthorityEnvelope({
         symbol: String(symbol),
         mode: v2Mode,
@@ -746,7 +766,14 @@ export function resolveSymbolDecisionEnvelope(
         stairStepBlockReason: execMeta.stair_step_block_reason ?? null,
         authoritativeCandleTs:
             typeof execMeta.authoritativeCandleTs === "number" ? execMeta.authoritativeCandleTs : null,
-        closedCandleTs: typeof execMeta.closedCandleTs === "number" ? execMeta.closedCandleTs : null
+        closedCandleTs: typeof execMeta.closedCandleTs === "number" ? execMeta.closedCandleTs : null,
+        entrySemantic: typeof execMeta.entrySemantic === "string" ? execMeta.entrySemantic : null,
+        isHighwayLineage: highwayLineageForEnvelope,
+        v2EntryReason: typeof execMeta.v2EntryReason === "string" ? execMeta.v2EntryReason : null,
+        limitingSizingAuthority:
+            typeof execMeta.limiting_sizing_authority === "string"
+                ? execMeta.limiting_sizing_authority
+                : null
     });
 
 

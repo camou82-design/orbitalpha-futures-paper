@@ -104,6 +104,13 @@ import { evaluateRiskControls, type RiskControlDecision } from "../strategy/risk
 import { rangeExecutorEvaluateEntry, rangeExecutorEvaluateExit } from "../strategy/executors/range-executor";
 import { trendExecutorEvaluateEntry } from "../strategy/executors/trend-executor";
 import { evaluateAiHighwayQuality } from "./ai-highway-filter";
+import {
+  emitPositionStructuralBoxSnapshotProof,
+  emitStructuralRangeBoxProofLogs,
+  resolveStructuralRangeBox,
+  type PersistedStructuralBoxState,
+  type StructuralBoxProofFields
+} from "./structural-range-box";
 import { highwayExitEngine } from "./highway-exit-engine";
 import type { AnyEntryDecision } from "../strategy/executors/types";
 import { executorForExitEventPayload } from "../strategy/executors/executor-normalize";
@@ -222,7 +229,8 @@ import {
     MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE,
     MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE,
     resolveEffectiveLiveOrderNotionalCap,
-    resolveUltimateSafetyCapForOrderSizing
+    resolveUltimateSafetyCapForOrderSizing,
+    resolveV2HardSafetyCapForAuthority
 } from "../engine-v2/risk-sizing/equity-adaptive-sizing";
 import { buildProtectiveOrderMatchProof, protectiveStopPricesMatch } from "../engine-v2/execution/protective-match";
 import {
@@ -307,6 +315,7 @@ import {
   buildMomentumIocLimitPx,
   classifyEntryOrderExecution,
   hasBlockingEntryPendingState,
+  LOW_VOLATILITY_ENTRY_ATR_REL_MAX,
   shouldCancelStaleEntryOrder,
   type EntryExecutionStyle
 } from "../engine-v2/execution/entry-order-type";
@@ -946,11 +955,15 @@ type SymbolSnapshot = Readonly<{
   emaGap: number | null;
   volumeRatioProxy: number;
   authoritySource?: "v1" | "v2";
-  /** RANGE/TREND 판단용 박스(최근 1m) */
+  /** RANGE/TREND/V2 zone authority (structural multi-lookback box). */
   boxHigh: number | null;
   boxLow: number | null;
   boxPos: number | null;
   boxRel: number | null;
+  microBoxHigh?: number | null;
+  microBoxLow?: number | null;
+  structuralBoxLookback?: number | null;
+  structuralBoxSelectedReason?: string | null;
   gateExpectedMove: number | null;
   gateRequiredMove: number | null;
   atr: number | null;
@@ -2022,6 +2035,9 @@ export class PaperEngine {
   private rangeRoundTripStreakBySymbol = new Map<string, number>();
   /** Consecutive close-eval ticks with raw box break (for EXIT_RANGE_REBALANCE debounce). */
   private rangeBoxBreakConsecutiveBySymbol = new Map<string, number>();
+  /** Per-symbol structural RANGE box (hysteresis); not the legacy 30×1m micro min/max. */
+  private structuralRangeBoxStateBySymbol = new Map<string, PersistedStructuralBoxState>();
+  private lastStructuralBoxProofBySymbol = new Map<string, StructuralBoxProofFields>();
   /** RANGE ?섏씡沅?異붿쥌: ?щ낵:openedAt ???쇳겕쨌?좉툑 (諛뺤뒪 ?댄깉 由щ갭?곗뒪 吏?곗슜). */
   private rangeProfitTrailByKey = new Map<string, RangeProfitTrailState>();
   /** RANGE upper short add-on: per-position one-shot guard (symbol:openedAt -> count). */
@@ -12267,7 +12283,10 @@ export class PaperEngine {
       isV2Authority: open.isV2Authority === true,
       regime,
       isV2RangePartialPlan,
-      isHighwayLineage: (open as any).isHighwayLineage === true || open.entrySemantic === "HIGHWAY",
+      isHighwayLineage:
+        (open as any).isHighwayLineage === true ||
+        open.entrySemantic === "HIGHWAY" ||
+        open.entrySemantic === "HIGHWAY_CORE",
       v2EntryReason: (open as any).v2EntryReason,
       entrySemantic: open.entrySemantic,
       rawWantsTp: true,
@@ -13389,6 +13408,7 @@ export class PaperEngine {
     isV2RangePartialPlan?: boolean;
     /** Failsafe-only: when true, emergency max notional may bind submit sizing. */
     emergencyFailsafeActive?: boolean;
+    isHighwayLineage?: boolean;
   }): Promise<{
     ok: boolean;
     ordId: string | null;
@@ -13823,7 +13843,9 @@ export class PaperEngine {
         v2HardSafetyCapUsdt: this.config.okxLiveV2MaxOrderNotionalUsdt ?? 600,
         intendedNotionalUsdt: final_submitted_notional_usdt,
         emergencyUltimateCapUsdt: liveCapResolution.emergencyCapUsdt,
-        emergencyFailsafeActive: input.emergencyFailsafeActive === true
+        emergencyFailsafeActive: input.emergencyFailsafeActive === true,
+        isHighwayLineage: input.isHighwayLineage === true,
+        appliedLeverage: okx_confirmed_leverage ?? input.appliedLeverage ?? 10
       });
       final_submitted_notional_usdt = staticCapResolution.finalSubmittedNotionalUsdt;
       if (staticCapResolution.finalSizeSource === "static_safety_cap") {
@@ -22933,10 +22955,22 @@ export class PaperEngine {
 
           const promotionReason = envelope.v2_execution_envelope?.promotion_reason ?? null;
           const entrySubtype = effectiveMarketSubtype || null;
+          const atrRelForEntry =
+            typeof first.atr === "number" && first.atr > 0 && first.lastPrice > 0
+              ? first.atr / first.lastPrice
+              : null;
+          const preferMakerLimit =
+            atrRelForEntry != null &&
+            atrRelForEntry <= LOW_VOLATILITY_ENTRY_ATR_REL_MAX &&
+            (authority.isHighwayLineage === true ||
+              authority.regime === "RANGE" ||
+              authority.entrySemantic === "HIGHWAY_CORE" ||
+              authority.entrySemantic === "HIGHWAY");
           const orderTypeClass = classifyEntryOrderExecution({
             promotionReason,
             entrySubtype,
-            executorReason: (decision as { reason?: string | null }).reason ?? res.executorDecision?.blocked_reason ?? null
+            executorReason: (decision as { reason?: string | null }).reason ?? res.executorDecision?.blocked_reason ?? null,
+            preferMakerLimit
           });
           const executionStyle: EntryExecutionStyle = orderTypeClass.executionStyle;
           const submitOrdType = orderTypeClass.ordType;
@@ -23227,7 +23261,8 @@ export class PaperEngine {
             stageMarginKrw: authority.stageMarginKrw ?? null,
             exposureNotionalKrw: authority.exposureNotionalKrw ?? null,
             isNewEntry: true,
-            orderNotionalUsdt: v2EntrySizeUsd
+            orderNotionalUsdt: v2EntrySizeUsd,
+            isHighwayLineage: authority.isHighwayLineage === true
           });
 
           this.logger.info("V2_ENTRY_ORDER_TYPE_AUTHORITY_PROOF", {
@@ -23417,7 +23452,9 @@ export class PaperEngine {
                 if (authority.isHighwayLineage === true) {
                   return {
                     isHighwayLineage: true,
-                    entrySemantic: authority.entrySemantic ?? "HIGHWAY_CORE"
+                    entrySemantic: authority.entrySemantic ?? "HIGHWAY_CORE",
+                    v2EntryReason: authority.v2EntryReason ?? "HIGHWAY_CORE_ENTRY",
+                    regimeAtEntry: "TREND"
                   };
                 }
                 return { isHighwayLineage: false };
@@ -24494,8 +24531,42 @@ export class PaperEngine {
           invalidationPx:
             authority.source === "v2" && v2CommittedRiskPlan
               ? v2CommittedRiskPlan.stop_price
-              : authority.invalidationPx ?? undefined
+              : authority.invalidationPx ?? undefined,
+          ...(authority.isHighwayLineage === true
+            ? {
+                isHighwayLineage: true,
+                entrySemantic: authority.entrySemantic ?? "HIGHWAY_CORE",
+                v2EntryReason: authority.v2EntryReason ?? "HIGHWAY_CORE_ENTRY",
+                regimeAtEntry: "TREND" as const
+              }
+            : {})
         };
+
+        const liveStructuralProof =
+          this.lastStructuralBoxProofBySymbol.get(String(record.symbol)) ??
+          ({
+            lookback: first.structuralBoxLookback ?? null,
+            boxHigh: first.boxHigh ?? null,
+            boxLow: first.boxLow ?? null,
+            boxHeight:
+              first.boxHigh != null && first.boxLow != null ? first.boxHigh - first.boxLow : null,
+            atr: first.atr ?? null,
+            boxHeightAtrRatio: null,
+            upperTouchCount: 0,
+            lowerTouchCount: 0,
+            breakoutHold: false,
+            selectedReason: first.structuralBoxSelectedReason ?? "snapshot_fallback",
+            boxPos: first.boxPos ?? null,
+            zone: "mid" as const
+          } satisfies StructuralBoxProofFields);
+        emitPositionStructuralBoxSnapshotProof(this.logger, {
+          symbol: String(record.symbol),
+          side: record.side,
+          rangeBoxHighAtEntry: record.rangeBoxHighAtEntry,
+          rangeBoxLowAtEntry: record.rangeBoxLowAtEntry,
+          liveStructuralProof,
+          entryPrice: record.entryPrice
+        });
 
         this.logger.info("POSITION_ENGINE_IDENTITY_PROOF", {
           symbol: record.symbol,
@@ -25400,16 +25471,25 @@ export class PaperEngine {
     const atr = atrWilderLast(rC.value, 14);
     const trend = trendFilterOneMinuteCloses(closes);
 
-    // Box context from recent completed 1m candles (used to enforce RANGE edge-only and TREND breakout/pullback).
+    // Structural RANGE box (30/60/120 1m cluster + touch validation); micro 30-bar min/max kept for audit only.
     const completed1m = rC.value.slice(0, -1);
-    const boxLookback = completed1m.slice(-30);
-    const boxHigh = boxLookback.length > 0 ? Math.max(...boxLookback.map((x) => x.high)) : null;
-    const boxLow = boxLookback.length > 0 ? Math.min(...boxLookback.map((x) => x.low)) : null;
-    const boxRel = boxHigh !== null && boxLow !== null && lastPrice > 0 ? (boxHigh - boxLow) / (lastPrice + 1e-9) : null;
-    const boxPos =
-      boxHigh !== null && boxLow !== null && boxHigh > boxLow
-        ? Math.min(1, Math.max(0, (lastPrice - boxLow) / (boxHigh - boxLow)))
-        : null;
+    const structuralBox = resolveStructuralRangeBox({
+      symbol: String(symbol),
+      completed1m,
+      lastPrice,
+      atr,
+      prevState: this.structuralRangeBoxStateBySymbol.get(String(symbol)) ?? null,
+      nowTs: fetchedAt
+    });
+    if (structuralBox.nextState !== null) {
+      this.structuralRangeBoxStateBySymbol.set(String(symbol), structuralBox.nextState);
+    }
+    this.lastStructuralBoxProofBySymbol.set(String(symbol), structuralBox.proof);
+    emitStructuralRangeBoxProofLogs(this.logger, String(symbol), structuralBox);
+    const boxHigh = structuralBox.boxHigh;
+    const boxLow = structuralBox.boxLow;
+    const boxRel = structuralBox.boxRel;
+    const boxPos = structuralBox.boxPos;
 
     let entry = evaluatePaperEntryV1({
       symbol,
@@ -25746,6 +25826,10 @@ export class PaperEngine {
       boxLow,
       boxPos,
       boxRel,
+      microBoxHigh: structuralBox.microBoxHigh,
+      microBoxLow: structuralBox.microBoxLow,
+      structuralBoxLookback: structuralBox.lookback,
+      structuralBoxSelectedReason: structuralBox.selectedReason,
       gateExpectedMove: gateEval?.expectedMove ?? null,
       gateRequiredMove: gateEval?.requiredMove ?? null,
       atr,
@@ -26050,6 +26134,10 @@ export class PaperEngine {
       partialExitRatio: typeof v2Decision.metadata?.partialExitRatio === "number" ? v2Decision.metadata.partialExitRatio : undefined,
       entrySemantic: typeof v2Decision.metadata?.entrySemantic === "string" ? v2Decision.metadata.entrySemantic : undefined,
       isHighwayLineage: v2Decision.metadata?.isHighwayLineage === true,
+      v2EntryReason:
+        typeof v2Decision.metadata?.v2EntryReason === "string"
+          ? v2Decision.metadata.v2EntryReason
+          : undefined,
       postShockProbeEpisodeId:
         typeof v2Decision.metadata?.postShockProbeEpisodeId === "string"
           ? v2Decision.metadata.postShockProbeEpisodeId
@@ -26871,6 +26959,9 @@ export function resolveLiveSubmitStaticSafetyCap(input: Readonly<{
   emergencyUltimateCapUsdt?: number | null;
   /** When true, emergency cap may bind submit notional (failsafe only). */
   emergencyFailsafeActive?: boolean;
+  /** Highway: raw V2 hard cap is margin USDT; otherwise gross notional (unchanged). */
+  isHighwayLineage?: boolean;
+  appliedLeverage?: number;
 }>): Readonly<{
   finalSubmittedNotionalUsdt: number;
   finalSizeSource: "v2_risk" | "static_safety_cap" | "emergency_ultimate_cap" | "v2_hard_safety_cap";
@@ -26886,7 +26977,16 @@ export function resolveLiveSubmitStaticSafetyCap(input: Readonly<{
   let emergencyCapReason: string | null = null;
 
   if (isV2) {
-    const v2HardCap = input.v2HardSafetyCapUsdt != null && input.v2HardSafetyCapUsdt > 0 ? input.v2HardSafetyCapUsdt : 600;
+    const rawHard =
+      input.v2HardSafetyCapUsdt != null && input.v2HardSafetyCapUsdt > 0
+        ? input.v2HardSafetyCapUsdt
+        : 600;
+    const hardCapResolution = resolveV2HardSafetyCapForAuthority({
+      v2HardSafetyCapRawUsdt: rawHard,
+      isHighwayLineage: input.isHighwayLineage === true,
+      appliedLeverage: input.appliedLeverage ?? 10
+    });
+    const v2HardCap = hardCapResolution.effectiveSafetyCapNotionalUsdt ?? rawHard;
     if (v2HardCap > 0 && finalSubmittedNotionalUsdt > v2HardCap) {
       finalSubmittedNotionalUsdt = v2HardCap;
       finalSizeSource = "v2_hard_safety_cap";

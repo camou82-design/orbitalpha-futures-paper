@@ -7,11 +7,24 @@ import {
 import { V2_POST_SHOCK_COUNTER_PROBE_SEMANTIC } from "../market-judgment/post-shock-probe-episode-authority";
 import {
     MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE,
-    MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE
+    MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE,
+    highwayMarginTargetToNotionalUsdt
 } from "../risk-sizing/equity-adaptive-sizing";
+import { resolveHighwayLineageFromOpenPosition } from "../highway-core/highway-lineage-authority";
 
 function withAddonMode<T extends V2AddOnPolicyResult>(result: T, addonMode: V2AddOnPolicyResult["addonMode"]): T {
     return { ...result, addonMode: addonMode ?? "NONE" };
+}
+
+/** RANGE ledger positions must not use Highway defensive-addon bypass paths. */
+function isRangeHeldPositionForHighwayAddon(
+    pos: Readonly<{ regimeAtEntry?: string; entrySemantic?: string; isHighwayLineage?: boolean }> | null | undefined
+): boolean {
+    if (!pos) return false;
+    if (pos.regimeAtEntry === "RANGE") return true;
+    if (resolveHighwayLineageFromOpenPosition(pos)) return false;
+    const sem = String(pos.entrySemantic ?? "").toUpperCase();
+    return sem.includes("RANGE");
 }
 
 function evaluateV2AddOnPolicyCore(args: EvaluateV2AddOnPolicyArgs): V2AddOnPolicyResult {
@@ -311,6 +324,61 @@ function evaluateV2AddOnPolicyCore(args: EvaluateV2AddOnPolicyArgs): V2AddOnPoli
     const isTransitionBlocked =
         judgment.regime_final === "TRANSITION" ||
         (transitionPhase !== "NONE" && !isRangeToTrendException);
+
+    const heldHighwayTrendPosition =
+        hasSameSidePosition &&
+        sameSidePosition != null &&
+        resolveHighwayLineageFromOpenPosition(sameSidePosition) &&
+        !isRangeHeldPositionForHighwayAddon(sameSidePosition);
+
+    if (heldHighwayTrendPosition && pnlPct <= 0) {
+        const adverseBase: V2AddOnPolicyResult = {
+            action: "ADDON_WATCH",
+            allowed: false,
+            reason: "SAME_SIDE_POSITION_WATCH_RECHECK",
+            addOnEligible: false,
+            isInitial,
+            isAddOn,
+            side,
+            currentStage,
+            hasSameSidePosition,
+            hasOppositeSidePosition,
+            marketRegime: judgment.regime_final,
+            marketSubtype: judgment.subtype,
+            shockPhase: judgment.shockPhase,
+            rangePhase: judgment.rangePhase,
+            trendPhase: judgment.trendPhase,
+            transitionPhase: judgment.transitionPhase,
+            qualityScore,
+            reviewingTicks,
+            pnlPct,
+            boxPos,
+            emaGap,
+            trendWeaknessScore,
+            rangeConfidence,
+            breakevenStopRequired,
+            breakevenStopConfirmed,
+            breakevenStopPrice,
+            evidence: "highway_adverse_before_transition_gate"
+        };
+        const highwayAdverseFirst = evaluateConfirmedAdverseAddOn(args, adverseBase);
+        if (highwayAdverseFirst.allowed) {
+            console.info(
+                JSON.stringify({
+                    event: "V2_HIGHWAY_ADVERSE_ADDON_PRIORITY_PROOF",
+                    symbol: String(args.symbol),
+                    side,
+                    bypassed_reason: "TRANSITION_ADDON_FORBIDDEN",
+                    would_transition_block: isTransitionBlocked,
+                    transition_phase: transitionPhase,
+                    addon_reason: highwayAdverseFirst.reason,
+                    pnl_pct: pnlPct,
+                    ts: Date.now()
+                })
+            );
+            return withAddonMode(highwayAdverseFirst, "CONFIRMED_ADVERSE_ADDON");
+        }
+    }
 
     if (isTransitionBlocked) {
         return {
@@ -711,7 +779,6 @@ function evaluateV2AddOnPolicyCore(args: EvaluateV2AddOnPolicyArgs): V2AddOnPoli
 
         // --- Highway / TREND Profit-Funded Pyramid Implementation ---
         const accountEquityUsd = args.accountEquityUsd || (v2State.accountEquityKrw || 1400000) / 1400;
-        const targetPyramidNotionalUsdt = accountEquityUsd * 0.25;
         const minimumProtectedProfitUsd = Math.max(0.5, accountEquityUsd * 0.0015);
         const symbolMaxNotional = accountEquityUsd * MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE;
         const globalMaxNotional = accountEquityUsd * MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE;
@@ -733,6 +800,14 @@ function evaluateV2AddOnPolicyCore(args: EvaluateV2AddOnPolicyArgs): V2AddOnPoli
             (execution?.metadata as Record<string, unknown> | undefined)?.isHighwayLineage === true ||
             (execution as any)?.entrySemantic === "HIGHWAY" ||
             (execution as any)?.entrySemantic === "HIGHWAY_CORE";
+
+        const pyramidAppliedLeverage = Math.max(
+            1,
+            Number(sameSidePosition?.leverage ?? (execution as { appliedLeverage?: number })?.appliedLeverage ?? 10)
+        );
+        const targetPyramidNotionalUsdt = isHighway
+            ? highwayMarginTargetToNotionalUsdt(accountEquityUsd * 0.25, pyramidAppliedLeverage)
+            : accountEquityUsd * 0.25;
 
         // Opposing Threat Guards (HTF polarity mismatch / reversal / stabilized opposing shock)
         const htfOpposing =

@@ -76,11 +76,23 @@ function includesContinuationWithoutRetest(value: string): boolean {
   return upper.includes("CONTINUATION") && !upper.includes("RETEST");
 }
 
+/** ATR/price below this → prefer passive maker-limit for Highway / RANGE entries. */
+export const LOW_VOLATILITY_ENTRY_ATR_REL_MAX = 0.0025;
+
 export function classifyEntryOrderExecution(input: Readonly<{
   promotionReason: string | null;
   entrySubtype: string | null;
   executorReason?: string | null;
+  preferMakerLimit?: boolean;
 }>): EntryOrderTypeClassification {
+  if (input.preferMakerLimit === true) {
+    return {
+      executionStyle: "PASSIVE_LIMIT",
+      ordType: "limit",
+      classificationReason: "low_vol_highway_or_range_maker_limit_preferred"
+    };
+  }
+
   const promo = (input.promotionReason ?? "").trim();
   const promoUpper = promo.toUpperCase();
   const subtype = (input.entrySubtype ?? "").trim();

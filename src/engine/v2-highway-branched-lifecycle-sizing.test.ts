@@ -1,10 +1,14 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { evaluateEquityAdaptiveSizing } from "../engine-v2/risk-sizing/equity-adaptive-sizing";
+import {
+  evaluateEquityAdaptiveSizing,
+  highwayMarginTargetToNotionalUsdt
+} from "../engine-v2/risk-sizing/equity-adaptive-sizing";
 import { resolveProtectiveTpPlan, shouldAttachFullPositionProtectiveTp } from "../engine-v2/execution/protective-tp-authority";
 import { evaluateConfirmedAdverseAddOn, evaluateDirectionalThesisForAdverseAddon } from "../engine-v2/addon/adverse-addon";
 import { evaluateV2AddOnPolicy } from "../engine-v2/addon/policy";
-import { deriveExecutionAuthority } from "../engine-v2/reconciler";
+import { deriveExecutionAuthority, deriveExecutionAuthorityFromEnvelope } from "../engine-v2/reconciler";
+import { classifyEntryOrderExecution, LOW_VOLATILITY_ENTRY_ATR_REL_MAX } from "../engine-v2/execution/entry-order-type";
 import { adaptV2Input } from "../engine-v2/index";
 import { deriveV2StateAuthority } from "../engine-v2/state/derive";
 import {
@@ -23,7 +27,6 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
   const APPLIED_LEVERAGE = 10;
   const LAST_PRICE = 65000;
   const STOP_PRICE = 64350; // 1.0% stop dist
-
   const mockStrongUpHighwayAuth = (): HighwayDirectionalAuthority => ({
     state: "STRONG_UP",
     strongUp: true,
@@ -70,8 +73,35 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
     }
   });
 
-  it("1. Highway Initial (isHighwayLineage: true) → Initial target evaluates to ~575 USDT without clipping under 600 cap", () => {
-    const res = evaluateEquityAdaptiveSizing({
+  it("1. Highway Initial → 25% equity margin × 10x = 5750 USDT notional (600 cap clips submit)", () => {
+    const targetMargin = DEFAULT_EQUITY * 0.25;
+    const targetNotional = highwayMarginTargetToNotionalUsdt(targetMargin, APPLIED_LEVERAGE);
+    assert.equal(targetNotional, 5750);
+
+    const uncapped = evaluateEquityAdaptiveSizing({
+      symbol: "BTCUSDT",
+      side: "long",
+      orderKind: "ENTRY",
+      accountEquityUsdt: DEFAULT_EQUITY,
+      availableBalanceUsdt: DEFAULT_EQUITY,
+      lastPrice: LAST_PRICE,
+      entryReferencePrice: LAST_PRICE,
+      effectiveStopPrice: STOP_PRICE,
+      appliedLeverage: APPLIED_LEVERAGE,
+      entryQualityGrade: "A",
+      existingSymbolNotionalUsdt: 0,
+      existingAccountNotionalUsdt: 0,
+      v2AuthorityEntry: true,
+      v2HardSafetyCapUsdt: 20_000,
+      isHighwayLineage: true
+    });
+    assert.equal(uncapped.highwayTargetMarginUsdt, targetMargin);
+    assert.equal(uncapped.highwayTargetNotionalUsdt, targetNotional);
+    assert.equal(uncapped.limitingAuthority, "risk_based_notional");
+    assert.ok(uncapped.preLotNotionalUsdt < targetNotional);
+    assert.ok(uncapped.preLotNotionalUsdt > 0);
+
+    const capped = evaluateEquityAdaptiveSizing({
       symbol: "BTCUSDT",
       side: "long",
       orderKind: "ENTRY",
@@ -88,11 +118,50 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
       v2HardSafetyCapUsdt: 600,
       isHighwayLineage: true
     });
+    assert.equal(capped.sizingPassed, true);
+    assert.equal(capped.safetyCapUnit, "margin");
+    assert.equal(capped.effectiveSafetyCapNotionalUsdt, 6000);
+    assert.notEqual(capped.limitingAuthority, "v2_hard_safety_cap");
+    assert.ok(capped.preLotNotionalUsdt > 600);
+  });
 
-    assert.equal(res.sizingPassed, true);
-    assert.equal(res.limitingAuthority, "highway_initial_target");
-    assert.equal(res.preLotNotionalUsdt, 575);
-    assert.ok(res.preLotNotionalUsdt <= 600, "575 USDT is within 600 cap");
+  it("43. [runtime cap audit] equity 2378 @ 10x Highway initial — equity_initial_cap binds at 5469.4 not 600", () => {
+    const equity = 2378;
+    const leverage = 10;
+    const margin = equity * 0.25;
+    const targetNotional = highwayMarginTargetToNotionalUsdt(margin, leverage);
+    const equityInitialCapUsdt = equity * 2.3;
+    assert.ok(Math.abs(margin - 594.5) < 0.01);
+    assert.ok(Math.abs(targetNotional - 5945) < 1);
+    assert.ok(Math.abs(equityInitialCapUsdt - 5469.4) < 0.1);
+
+    const res = evaluateEquityAdaptiveSizing({
+      symbol: "BTCUSDT",
+      side: "long",
+      orderKind: "ENTRY",
+      accountEquityUsdt: equity,
+      availableBalanceUsdt: equity,
+      lastPrice: LAST_PRICE,
+      entryReferencePrice: LAST_PRICE,
+      effectiveStopPrice: 64700,
+      appliedLeverage: leverage,
+      entryQualityGrade: "A",
+      existingSymbolNotionalUsdt: 0,
+      existingAccountNotionalUsdt: 0,
+      v2AuthorityEntry: true,
+      v2HardSafetyCapUsdt: 600,
+      isHighwayLineage: true
+    });
+
+    assert.equal(res.highwayTargetMarginUsdt, margin);
+    assert.ok(Math.abs((res.highwayTargetNotionalUsdt ?? 0) - targetNotional) < 1);
+    assert.equal(res.safetyCapRawValue, 600);
+    assert.equal(res.safetyCapUnit, "margin");
+    assert.equal(res.effectiveSafetyCapNotionalUsdt, 6000);
+    assert.ok(res.riskBasedNotionalUsdt > targetNotional);
+    assert.equal(res.limitingAuthority, "equity_initial_cap");
+    assert.ok(Math.abs(res.preLotNotionalUsdt - equityInitialCapUsdt) < 0.01);
+    assert.ok(Math.abs(res.finalOrderNotionalUsdt - equityInitialCapUsdt) < 1);
   });
 
   it("2. Non-Highway FTS entry (isHighwayLineage: false/undefined) → does NOT receive 25% Highway target constraint", () => {
@@ -145,52 +214,59 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
     assert.notEqual(res.limitingAuthority, "highway_initial_target");
   });
 
-  it("4. Highway Initial adverse move + thesis intact → Defensive Add target evaluates to ~517.5 USDT", () => {
+  it("4. Highway defensive add → margin 22.5% equity, notional 5175 at 10x", () => {
+    const targetMargin = DEFAULT_EQUITY * 0.75 * 0.30;
+    assert.equal(targetMargin, 517.5);
+    const targetNotional = highwayMarginTargetToNotionalUsdt(targetMargin, APPLIED_LEVERAGE);
+    assert.equal(targetNotional, 5175);
+
     const res = evaluateEquityAdaptiveSizing({
       symbol: "BTCUSDT",
       side: "long",
       orderKind: "ADVERSE_ADDON",
       accountEquityUsdt: DEFAULT_EQUITY,
-      availableBalanceUsdt: DEFAULT_EQUITY - 57.5,
-      lastPrice: LAST_PRICE * 0.98,
-      entryReferencePrice: LAST_PRICE * 0.98,
+      availableBalanceUsdt: DEFAULT_EQUITY,
+      lastPrice: LAST_PRICE,
+      entryReferencePrice: LAST_PRICE,
       effectiveStopPrice: STOP_PRICE,
       appliedLeverage: APPLIED_LEVERAGE,
-      existingSymbolNotionalUsdt: 575,
-      existingAccountNotionalUsdt: 575,
+      existingSymbolNotionalUsdt: 600,
+      existingAccountNotionalUsdt: 600,
       v2AuthorityEntry: true,
-      v2HardSafetyCapUsdt: 600,
+      v2HardSafetyCapUsdt: 20_000,
       isHighwayLineage: true
     });
 
     assert.equal(res.sizingPassed, true);
+    assert.equal(res.highwayTargetMarginUsdt, targetMargin);
+    assert.equal(res.highwayTargetNotionalUsdt, targetNotional);
     assert.equal(res.limitingAuthority, "highway_defensive_target");
-    assert.equal(res.preLotNotionalUsdt, 517.5); // 2300 * 0.75 * 0.30 = 517.5
-    assert.ok(res.preLotNotionalUsdt <= 600, "517.5 USDT is within 600 cap");
+    assert.equal(res.preLotNotionalUsdt, 5175);
   });
 
-  it("5. Highway Initial favorable move + real OKX active stop locking profit → Pyramid target evaluates to ~575 USDT", () => {
+  it("5. Highway pyramid add → same 25% margin × leverage notional as initial (5750)", () => {
     const res = evaluateEquityAdaptiveSizing({
       symbol: "BTCUSDT",
       side: "long",
       orderKind: "PYRAMIDING_ADDON",
       accountEquityUsdt: DEFAULT_EQUITY,
-      availableBalanceUsdt: DEFAULT_EQUITY - 57.5,
-      lastPrice: LAST_PRICE * 1.02,
-      entryReferencePrice: LAST_PRICE * 1.02,
-      effectiveStopPrice: LAST_PRICE * 1.005,
+      availableBalanceUsdt: DEFAULT_EQUITY,
+      lastPrice: LAST_PRICE,
+      entryReferencePrice: LAST_PRICE,
+      effectiveStopPrice: STOP_PRICE,
       appliedLeverage: APPLIED_LEVERAGE,
-      existingSymbolNotionalUsdt: 575,
-      existingAccountNotionalUsdt: 575,
+      existingSymbolNotionalUsdt: 600,
+      existingAccountNotionalUsdt: 600,
       v2AuthorityEntry: true,
-      v2HardSafetyCapUsdt: 600,
+      v2HardSafetyCapUsdt: 20_000,
       isHighwayLineage: true
     });
 
     assert.equal(res.sizingPassed, true);
-    assert.equal(res.limitingAuthority, "highway_pyramid_target");
-    assert.equal(res.preLotNotionalUsdt, 575);
-    assert.ok(res.preLotNotionalUsdt <= 600, "575 USDT is within 600 cap");
+    assert.equal(res.highwayTargetMarginUsdt, DEFAULT_EQUITY * 0.25);
+    assert.equal(res.highwayTargetNotionalUsdt, 5750);
+    assert.equal(res.limitingAuthority, "account_open_risk_cap");
+    assert.equal(res.preLotNotionalUsdt, 5175);
   });
 
   it("6. Defensive Add executed (adverseAddonCount=1) → subsequent Pyramid is strictly forbidden", () => {
@@ -397,26 +473,29 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
     assert.equal(authority.entrySemantic, "HIGHWAY");
   });
 
-  it("16. 600 USDT per-order cap allows 575 / 517.5 / 575 USDT orders without clipping", () => {
-    const capResInitial = resolveLiveSubmitStaticSafetyCap({
+  it("16. V2 submit cap: non-Highway 600 notional clips; Highway 600 margin → 6000 notional ceiling", () => {
+    const genericV2 = resolveLiveSubmitStaticSafetyCap({
       authoritySource: "v2",
       okxLiveStaticNotionalCapEnabled: true,
       staticSafetyCapUsdt: 40,
       v2HardSafetyCapUsdt: 600,
-      intendedNotionalUsdt: 575
+      intendedNotionalUsdt: 5750,
+      isHighwayLineage: false
     });
-    assert.equal(capResInitial.finalSubmittedNotionalUsdt, 575);
-    assert.equal(capResInitial.finalSizeSource, "v2_risk");
+    assert.equal(genericV2.finalSubmittedNotionalUsdt, 600);
+    assert.equal(genericV2.finalSizeSource, "v2_hard_safety_cap");
 
-    const capResDefensive = resolveLiveSubmitStaticSafetyCap({
+    const highwaySubmit = resolveLiveSubmitStaticSafetyCap({
       authoritySource: "v2",
       okxLiveStaticNotionalCapEnabled: true,
       staticSafetyCapUsdt: 40,
       v2HardSafetyCapUsdt: 600,
-      intendedNotionalUsdt: 517.5
+      intendedNotionalUsdt: 5945,
+      isHighwayLineage: true,
+      appliedLeverage: 10
     });
-    assert.equal(capResDefensive.finalSubmittedNotionalUsdt, 517.5);
-    assert.equal(capResDefensive.finalSizeSource, "v2_risk");
+    assert.equal(highwaySubmit.finalSubmittedNotionalUsdt, 5945);
+    assert.equal(highwaySubmit.finalSizeSource, "v2_risk");
   });
 
   it("17. Non-V2 Legacy entries still strictly enforce legacy 40 USDT cap (no regression)", () => {
@@ -481,11 +560,8 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
   });
 
   it("19. +50 USDT + valid pullback/retest → Pullback Pyramid allowed (HIGHWAY_PULLBACK_PYRAMID_ALLOWED)", () => {
-    // entry 65000, current 71000 -> profit = 53.07 USDT (>= 50)
-    // addon 575 -> totalNotional = 1150, avgEntry = 68000
-    // active stop 70600 -> gross = 43.97, friction = 1.38 -> net = 42.59 USDT (>= 40)
-    const entryPrice = 65000;
-    const currentPrice = 71000;
+    const entryPrice = 60000;
+    const currentPrice = 70000;
     const res = evaluateV2AddOnPolicy({
       symbol: "BTCUSDT",
       side: "long",
@@ -531,8 +607,8 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
   });
 
   it("20. +50 USDT + no pullback + strong highway continuation → Momentum Pyramid allowed (HIGHWAY_MOMENTUM_CONTINUATION_PYRAMID_ALLOWED)", () => {
-    const entryPrice = 65000;
-    const currentPrice = 71000;
+    const entryPrice = 60000;
+    const currentPrice = 70000;
     const res = evaluateV2AddOnPolicy({
       symbol: "BTCUSDT",
       side: "long",
@@ -625,16 +701,12 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
   });
 
   it("22. Additional entry with weighted avg net protected profit 39 USDT (< 40) → blocked (NET_PROTECTED_PROFIT_BELOW_40_USDT)", () => {
-    const entryPrice = 65000;
-    const currentPrice = 71000;
-    // active stop at 70100:
-    // avgEntry = 68000, totalNotional = 1150
-    // gross = 1150 * (70100 - 68000) / 68000 = 35.51 USDT
-    // friction = 1.38 USDT -> Net = 34.13 USDT (< 40 USDT)
+    const entryPrice = 60000;
+    const currentPrice = 70000;
     const res = evaluateV2AddOnPolicy({
       symbol: "BTCUSDT",
       side: "long",
-      accountEquityUsd: 2300,
+      accountEquityUsd: 230,
       v2State: {
         longPosition: {
           side: "long",
@@ -646,7 +718,7 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
           adverseAddonCount: 0
         },
         okxAlgoOrdersList: [
-          { instId: "BTC-USDT-SWAP", side: "sell", state: "live", triggerPx: 70100, algoType: "stop" }
+          { instId: "BTC-USDT-SWAP", side: "sell", state: "live", triggerPx: 64000, algoType: "stop" }
         ]
       } as any,
       judgment: {
@@ -672,12 +744,12 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
     assert.equal(res.allowed, false);
     assert.equal(res.action, "ADDON_WATCH");
     assert.equal(res.addonBlockedReason, "NET_PROTECTED_PROFIT_BELOW_40_USDT");
+    assert.ok(Number(res.lockedProfitUsdt) < 40);
   });
 
   it("23. Net protected profit >= 40 USDT → allowed with verified stop lock", () => {
-    const entryPrice = 65000;
-    const currentPrice = 71000;
-    // active stop at 70600 -> Net = 42.59 USDT (>= 40 USDT)
+    const entryPrice = 60000;
+    const currentPrice = 70000;
     const res = evaluateV2AddOnPolicy({
       symbol: "BTCUSDT",
       side: "long",
@@ -885,8 +957,10 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
     const currentPrice = 70000;
     const sizeUsd = 575;
     const existingQty = sizeUsd / entryPrice;
-    const addonQty    = 575 / currentPrice; // targetPyramidNotionalUsdt = equity * 0.25 = 575
-    const expectedAvg = (sizeUsd + 575) / (existingQty + addonQty);
+    const pyramidNotional = highwayMarginTargetToNotionalUsdt(2300 * 0.25, 10);
+    assert.equal(pyramidNotional, 5750);
+    const addonQty = pyramidNotional / currentPrice;
+    const expectedAvg = (sizeUsd + pyramidNotional) / (existingQty + addonQty);
 
     const res = evaluateV2AddOnPolicy({
       symbol: "BTCUSDT",
@@ -1034,8 +1108,8 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
   });
 
   it("30. [감사2] retestTouched=true + retestRejected=true → Pullback Pyramid 허용 (HIGHWAY_PULLBACK_PYRAMID_ALLOWED)", () => {
-    const entryPrice = 65000;
-    const currentPrice = 71000;
+    const entryPrice = 60000;
+    const currentPrice = 70000;
     const res = evaluateV2AddOnPolicy({
       symbol: "BTCUSDT",
       side: "long",
@@ -1084,8 +1158,8 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
   // 기존 projectedLossAtStopUsdt는 더 이상 존재하지 않아야 함
   // =============================================================
   it("31. [감사4] riskProjection에 projectedGrossProtectedProfitAtStopUsdt 존재, projectedLossAtStopUsdt 없음", () => {
-    const entryPrice = 65000;
-    const currentPrice = 71000;
+    const entryPrice = 60000;
+    const currentPrice = 70000;
     const res = evaluateV2AddOnPolicy({
       symbol: "BTCUSDT",
       side: "long",
@@ -1142,7 +1216,7 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
       "net protected profit must be <= gross");
   });
 
-  it("32. [연결] Highway Core evidence (v2EntryReason) → lineage assign + Initial 25% sizing 575", () => {
+  it("32. [연결] Highway Core evidence (v2EntryReason) → lineage assign + 25% margin → 5750 notional", () => {
     const assign = resolveInitialHighwayLineageAssignment({
       isAddOn: false,
       finalDecisionEnter: true,
@@ -1170,11 +1244,12 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
       existingSymbolNotionalUsdt: 0,
       existingAccountNotionalUsdt: 0,
       v2AuthorityEntry: true,
-      v2HardSafetyCapUsdt: 600,
+      v2HardSafetyCapUsdt: 20_000,
       isHighwayLineage: true
     });
-    assert.equal(sizing.limitingAuthority, "highway_initial_target");
-    assert.equal(sizing.preLotNotionalUsdt, 575);
+    assert.equal(sizing.highwayTargetNotionalUsdt, 5750);
+    assert.equal(sizing.highwayTargetMarginUsdt, DEFAULT_EQUITY * 0.25);
+    assert.ok(sizing.preLotNotionalUsdt < 5750);
   });
 
   it("33. [연결] SHOCK_REACTION_upper_breakout_continuation_long → lineage false, no highway sizing", () => {
@@ -1255,6 +1330,38 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
     assert.equal(pos?.isHighwayLineage, true);
     const v2State = deriveV2StateAuthority(adapted);
     assert.equal(v2State.longPosition?.isHighwayLineage, true);
+  });
+
+  it("35b. [연결] envelope authority preserves Highway lineage + v2EntryReason", () => {
+    const authority = deriveExecutionAuthorityFromEnvelope({
+      decision: "ENTER",
+      side: "long",
+      stageMarginKrw: 575000,
+      baseStageMarginKrw: 575000,
+      regime: "TREND",
+      source: "v2",
+      appliedLeverage: 10,
+      entrySemantic: "HIGHWAY_CORE",
+      isHighwayLineage: true,
+      v2EntryReason: "HIGHWAY_CORE_ENTRY",
+      limitingSizingAuthority: "highway_initial_target",
+      invalidationPx: 90000,
+      stopPrice: 90000
+    } as any);
+    assert.equal(authority.isHighwayLineage, true);
+    assert.equal(authority.v2EntryReason, "HIGHWAY_CORE_ENTRY");
+    assert.equal(authority.entrySemantic, "HIGHWAY_CORE");
+  });
+
+  it("35c. low-vol Highway/RANGE entry prefers maker-limit", () => {
+    const cls = classifyEntryOrderExecution({
+      promotionReason: "BREAKOUT_CONTINUATION",
+      entrySubtype: "TREND_UP_CONTINUATION",
+      preferMakerLimit: true
+    });
+    assert.equal(cls.executionStyle, "PASSIVE_LIMIT");
+    assert.equal(cls.ordType, "limit");
+    assert.ok(LOW_VOLATILITY_ENTRY_ATR_REL_MAX > 0);
   });
 
   it("35. [연결] reconciler authority reflects metadata isHighwayLineage for reload path", () => {
@@ -1362,7 +1469,7 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
     assert.equal(assign, false);
   });
 
-  it("40. [live-path] Highway Core gate+VALID+strongUp stamp → assign true → highway_initial_target 575", () => {
+  it("40. [live-path] Highway Core gate+VALID+strongUp stamp → assign true → highway_initial_target 5750", () => {
     const eligible = resolveHighwayCoreEntryProvenanceEligible({
       initialEntryCandidate: true,
       highwayGateAllowed: true,
@@ -1407,11 +1514,11 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
       existingSymbolNotionalUsdt: 0,
       existingAccountNotionalUsdt: 0,
       v2AuthorityEntry: true,
-      v2HardSafetyCapUsdt: 600,
+      v2HardSafetyCapUsdt: 20_000,
       isHighwayLineage: assign
     });
-    assert.equal(sizing.limitingAuthority, "highway_initial_target");
-    assert.equal(sizing.preLotNotionalUsdt, 575);
+    assert.equal(sizing.highwayTargetNotionalUsdt, 5750);
+    assert.ok(sizing.preLotNotionalUsdt < 5750);
   });
 
   it("41. [live-path] generic TREND (WEAK alignment) → provenance ineligible → assign false", () => {
@@ -1457,6 +1564,30 @@ describe("Highway Branched Lifecycle & Sizing Architecture Regression", () => {
       highwayDirectional: mockStrongUpHighwayAuth()
     });
     assert.equal(eligible, false);
+  });
+
+  it("44. non-Highway V2 keeps 600 gross notional safety cap (no regression)", () => {
+    const res = evaluateEquityAdaptiveSizing({
+      symbol: "BTCUSDT",
+      side: "long",
+      orderKind: "ENTRY",
+      accountEquityUsdt: 2378,
+      availableBalanceUsdt: 2378,
+      lastPrice: LAST_PRICE,
+      entryReferencePrice: LAST_PRICE,
+      effectiveStopPrice: STOP_PRICE,
+      appliedLeverage: 10,
+      entryQualityGrade: "A",
+      existingSymbolNotionalUsdt: 0,
+      existingAccountNotionalUsdt: 0,
+      v2AuthorityEntry: true,
+      v2HardSafetyCapUsdt: 600,
+      isHighwayLineage: false
+    });
+    assert.equal(res.safetyCapUnit, "notional");
+    assert.equal(res.effectiveSafetyCapNotionalUsdt, 600);
+    assert.equal(res.limitingAuthority, "v2_hard_safety_cap");
+    assert.equal(res.preLotNotionalUsdt, 600);
   });
 });
 

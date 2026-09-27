@@ -126,6 +126,10 @@ export type V2ExecutionAuthorityEnvelope = Readonly<{
     stair_step_block_reason?: string | null;
     authoritativeCandleTs?: number | null;
     closedCandleTs?: number | null;
+    entrySemantic?: string | null;
+    isHighwayLineage?: boolean | null;
+    v2EntryReason?: string | null;
+    limitingSizingAuthority?: string | null;
 }>;
 export type V2LegacyComparison = Readonly<{
     legacyDecision: EngineV2FinalDecision;
@@ -215,4 +219,8 @@ export type BuildExecutionEnvelopeArgs = Readonly<{
     stairStepBlockReason?: string | null;
     authoritativeCandleTs?: number | null;
     closedCandleTs?: number | null;
+    entrySemantic?: string | null;
+    isHighwayLineage?: boolean | null;
+    v2EntryReason?: string | null;
+    limitingSizingAuthority?: string | null;
 }>;

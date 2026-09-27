@@ -24,10 +24,22 @@ export const MAX_INITIAL_NOTIONAL_EQUITY_MULTIPLE = 2.3;
 export const MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE = 2.75;
 export const MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE = 3.0;
 export const MAX_ADVERSE_ADDON_EQUITY_MULTIPLE = 0.25;
+
+/** Highway targets are margin (USDT); gross order notional = margin × leverage. */
+export function highwayMarginTargetToNotionalUsdt(
+    marginUsdt: number,
+    appliedLeverage: number
+): number {
+    const lev = typeof appliedLeverage === "number" && appliedLeverage > 0 ? appliedLeverage : 10;
+    return marginUsdt * lev;
+}
 export const MARGIN_RESERVE_RATIO_DEFAULT = 0.2;
 export const RISK_BUDGET_TOLERANCE_MULTIPLIER = 1.2;
 export const ROUND_TRIP_FEE_RATE_DEFAULT = 0.001;
+/** Default V2 per-order safety raw value (see `resolveV2HardSafetyCapForAuthority` for unit by lineage). */
 export const DEFAULT_V2_HARD_SAFETY_CAP_USDT = 600;
+
+export type V2HardSafetyCapUnit = "margin" | "notional";
 
 export type EquitySizingOrderKind = "ENTRY" | "PYRAMIDING_ADDON" | "ADVERSE_ADDON";
 
@@ -143,8 +155,14 @@ export type EquityAdaptiveSizingResult = Readonly<{
     v2HardCapUsdt: number | null;
     /** min(emergency, legacy) binding cap for non-V2 live paths; null for normal V2 authority. */
     effectiveLiveCapUsdt: number | null;
-    /** Cap applied inside evaluateEquityAdaptiveSizing pre-lot min(); null for normal V2 authority. */
+    /** Cap applied inside evaluateEquityAdaptiveSizing pre-lot min() (always notional USDT). */
     ultimateSafetyCapUsdt: number | null;
+    /** Raw OKX_LIVE_V2_MAX_ORDER_NOTIONAL_USDT config before lineage unit resolution. */
+    safetyCapRawValue: number | null;
+    /** margin = per-order initial margin ceiling (Highway); notional = gross notional ceiling (non-Highway V2). */
+    safetyCapUnit: V2HardSafetyCapUnit | null;
+    /** V2 hard safety cap expressed as gross notional for min() with other notional caps. */
+    effectiveSafetyCapNotionalUsdt: number | null;
     legacyCapSource: string | null;
     /** usableAvailableBalanceUsdt × appliedLeverage — margin-derived notional ceiling. */
     availableBalanceCapUsdt: number;
@@ -152,6 +170,10 @@ export type EquityAdaptiveSizingResult = Readonly<{
     preProbeNotionalUsdt: number;
     /** Which authority bound pre-probe notional. */
     limitingAuthority: string;
+    /** Highway margin target (USDT) before leverage; null if not Highway sizing. */
+    highwayTargetMarginUsdt?: number | null;
+    /** Highway gross notional target (margin × leverage); null if not Highway sizing. */
+    highwayTargetNotionalUsdt?: number | null;
     /** Final sizing authority label after probe/HTF/lot normalization. */
     finalSizingAuthority: string;
     /** True only when emergency failsafe cap actually bound sizing. */
@@ -290,6 +312,102 @@ export function resolveUltimateSafetyCapForOrderSizing(input: Readonly<{
     };
 }
 
+/**
+ * Highway lineage: raw V2 hard safety value is initial-margin USDT (legacy ~600 margin guard),
+ * converted to gross notional via leverage for sizing min().
+ * Non-Highway V2 / ETH / RANGE: raw value remains gross notional (env name unchanged).
+ */
+export function resolveV2HardSafetyCapForAuthority(input: Readonly<{
+    v2HardSafetyCapRawUsdt: number | null | undefined;
+    isHighwayLineage?: boolean;
+    appliedLeverage: number;
+}>): Readonly<{
+    safetyCapRawValue: number | null;
+    safetyCapUnit: V2HardSafetyCapUnit;
+    effectiveSafetyCapNotionalUsdt: number | null;
+}> {
+    const raw = positiveCapUsdt(input.v2HardSafetyCapRawUsdt);
+    if (raw == null) {
+        return {
+            safetyCapRawValue: null,
+            safetyCapUnit: "notional",
+            effectiveSafetyCapNotionalUsdt: null
+        };
+    }
+    if (input.isHighwayLineage === true) {
+        return {
+            safetyCapRawValue: raw,
+            safetyCapUnit: "margin",
+            effectiveSafetyCapNotionalUsdt: highwayMarginTargetToNotionalUsdt(raw, input.appliedLeverage)
+        };
+    }
+    return {
+        safetyCapRawValue: raw,
+        safetyCapUnit: "notional",
+        effectiveSafetyCapNotionalUsdt: raw
+    };
+}
+
+/** Binding V2 ultimate safety cap as notional USDT (post lineage unit resolution). */
+export function resolveEffectiveUltimateSafetyCapNotionalUsdt(input: Readonly<{
+    v2AuthorityEntry?: boolean;
+    emergencyFailsafeActive?: boolean;
+    emergencyCapUsdt?: number | null;
+    legacyStaticCapUsdt?: number | null;
+    v2HardSafetyCapUsdt?: number | null;
+    isHighwayLineage?: boolean;
+    appliedLeverage: number;
+}>): Readonly<{
+    emergencyCapUsdt: number | null;
+    legacyStaticCapUsdt: number | null;
+    effectiveLiveCapUsdt: number | null;
+    legacyCapSource: string | null;
+    v2HardSafetyCapUsdt: number | null;
+    safetyCapRawValue: number | null;
+    safetyCapUnit: V2HardSafetyCapUnit;
+    effectiveSafetyCapNotionalUsdt: number | null;
+}> {
+    const emergency = resolveUltimateSafetyCapForOrderSizing({
+        v2AuthorityEntry: input.v2AuthorityEntry === true,
+        emergencyFailsafeActive: input.emergencyFailsafeActive === true,
+        emergencyCapUsdt: input.emergencyCapUsdt,
+        legacyStaticCapUsdt: input.legacyStaticCapUsdt,
+        v2HardSafetyCapUsdt: input.v2HardSafetyCapUsdt
+    });
+    const hardCap = resolveV2HardSafetyCapForAuthority({
+        v2HardSafetyCapRawUsdt: emergency.v2HardSafetyCapUsdt,
+        isHighwayLineage: input.isHighwayLineage,
+        appliedLeverage: input.appliedLeverage
+    });
+
+    let effectiveLiveCapUsdt: number | null = null;
+    if (input.v2AuthorityEntry === true) {
+        const activeEmergency =
+            input.emergencyFailsafeActive === true ? positiveCapUsdt(input.emergencyCapUsdt) : null;
+        const v2HardNotional = hardCap.effectiveSafetyCapNotionalUsdt;
+        if (activeEmergency != null && v2HardNotional != null) {
+            effectiveLiveCapUsdt = Math.min(activeEmergency, v2HardNotional);
+        } else if (activeEmergency != null) {
+            effectiveLiveCapUsdt = activeEmergency;
+        } else {
+            effectiveLiveCapUsdt = v2HardNotional;
+        }
+    } else {
+        effectiveLiveCapUsdt = emergency.effectiveLiveCapUsdt;
+    }
+
+    return {
+        emergencyCapUsdt: emergency.emergencyCapUsdt,
+        legacyStaticCapUsdt: emergency.legacyStaticCapUsdt,
+        effectiveLiveCapUsdt,
+        legacyCapSource: emergency.legacyCapSource,
+        v2HardSafetyCapUsdt: emergency.v2HardSafetyCapUsdt,
+        safetyCapRawValue: hardCap.safetyCapRawValue,
+        safetyCapUnit: hardCap.safetyCapUnit,
+        effectiveSafetyCapNotionalUsdt: hardCap.effectiveSafetyCapNotionalUsdt
+    };
+}
+
 function resolveBindingLimitingAuthority(
     candidates: ReadonlyArray<{ key: string; value: number }>
 ): string {
@@ -405,26 +523,34 @@ export function evaluateEquityAdaptiveSizing(
         ? Math.min(equity * MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE, input.maxSymbolNotionalCapUsdt)
         : equity * MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE;
     const accountCapUsdt = equity * MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE;
-    const maxAdverseAddonUsdt = input.maxAdverseAddonCapUsdt != null && input.maxAdverseAddonCapUsdt > 0
-        ? input.maxAdverseAddonCapUsdt
-        : equity * MAX_ADVERSE_ADDON_EQUITY_MULTIPLE;
+    const maxAdverseAddonUsdt =
+        input.maxAdverseAddonCapUsdt != null && input.maxAdverseAddonCapUsdt > 0
+            ? input.maxAdverseAddonCapUsdt
+            : highwayMarginTargetToNotionalUsdt(
+                  equity * MAX_ADVERSE_ADDON_EQUITY_MULTIPLE,
+                  input.appliedLeverage
+              );
     const marginReserveRatio = input.marginReserveRatio ?? MARGIN_RESERVE_RATIO_DEFAULT;
     const usableAvailableBalanceUsdt = input.availableBalanceUsdt * (1 - marginReserveRatio);
     const availableBalanceCapUsdt =
         usableAvailableBalanceUsdt * Math.max(1, input.appliedLeverage);
-    const emergency = resolveUltimateSafetyCapForOrderSizing({
+    const isHighwayLineageEarly = input.isHighwayLineage === true;
+    const safetyCapResolution = resolveEffectiveUltimateSafetyCapNotionalUsdt({
         v2AuthorityEntry: input.v2AuthorityEntry === true,
         emergencyFailsafeActive: input.emergencyFailsafeActive === true,
         emergencyCapUsdt: input.emergencyAbsoluteCapUsdt,
         legacyStaticCapUsdt: input.legacyStaticCapUsdt,
-        v2HardSafetyCapUsdt: input.v2HardSafetyCapUsdt
+        v2HardSafetyCapUsdt: input.v2HardSafetyCapUsdt,
+        isHighwayLineage: isHighwayLineageEarly,
+        appliedLeverage: input.appliedLeverage
     });
-    const ultimateSafetyCapUsdt = emergency.effectiveLiveCapUsdt;
-    const emergencyCapApplied = ultimateSafetyCapUsdt != null;
-    const emergencyCapReason =
-        emergencyCapApplied && input.emergencyFailsafeActive === true
-            ? emergency.legacyCapSource ?? "OKX_LIVE_EMERGENCY_MAX_ORDER_NOTIONAL_USDT_FAILSAFE"
-            : null;
+    const emergency = safetyCapResolution;
+    const ultimateSafetyCapUsdt = safetyCapResolution.effectiveLiveCapUsdt;
+    const emergencyCapApplied =
+        input.emergencyFailsafeActive === true && safetyCapResolution.emergencyCapUsdt != null;
+    const emergencyCapReason = emergencyCapApplied
+        ? safetyCapResolution.legacyCapSource ?? "OKX_LIVE_EMERGENCY_MAX_ORDER_NOTIONAL_USDT_FAILSAFE"
+        : null;
 
     const isMicro =
         input.isMicroProbe === true ||
@@ -499,6 +625,9 @@ export function evaluateEquityAdaptiveSizing(
         collapseRatio: 1.0,
         sizingCollapseDetected: false,
         v2HardCapUsdt: emergency.v2HardSafetyCapUsdt,
+        safetyCapRawValue: emergency.safetyCapRawValue,
+        safetyCapUnit: emergency.safetyCapUnit,
+        effectiveSafetyCapNotionalUsdt: emergency.effectiveSafetyCapNotionalUsdt,
         limitingAuthority: partial.limitingAuthority ?? "blocked",
         finalSizingAuthority: partial.finalSizingAuthority ?? "blocked",
         emergencyCapApplied,
@@ -568,9 +697,36 @@ export function evaluateEquityAdaptiveSizing(
     const remainingAccountCapacity = Math.max(0, accountCapUsdt - input.existingAccountNotionalUsdt);
 
     const isHighway = input.isHighwayLineage === true;
-    const highwayInitialTargetUsdt = equity * 0.25;
-    const highwayDefensiveTargetUsdt = equity * 0.75 * 0.30; // equity * 22.5%
-    const highwayPyramidTargetUsdt = equity * 0.25;
+    const highwayInitialMarginUsdt = equity * 0.25;
+    const highwayDefensiveMarginUsdt = equity * 0.75 * 0.30; // equity × 22.5% margin budget
+    const highwayPyramidMarginUsdt = equity * 0.25;
+    const highwayInitialTargetNotionalUsdt = highwayMarginTargetToNotionalUsdt(
+        highwayInitialMarginUsdt,
+        input.appliedLeverage
+    );
+    const highwayDefensiveTargetNotionalUsdt = highwayMarginTargetToNotionalUsdt(
+        highwayDefensiveMarginUsdt,
+        input.appliedLeverage
+    );
+    const highwayPyramidTargetNotionalUsdt = highwayMarginTargetToNotionalUsdt(
+        highwayPyramidMarginUsdt,
+        input.appliedLeverage
+    );
+
+    let highwayTargetMarginUsdt: number | null = null;
+    let highwayTargetNotionalUsdt: number | null = null;
+    if (isHighway) {
+        if (input.orderKind === "ENTRY") {
+            highwayTargetMarginUsdt = highwayInitialMarginUsdt;
+            highwayTargetNotionalUsdt = highwayInitialTargetNotionalUsdt;
+        } else if (input.orderKind === "ADVERSE_ADDON") {
+            highwayTargetMarginUsdt = highwayDefensiveMarginUsdt;
+            highwayTargetNotionalUsdt = highwayDefensiveTargetNotionalUsdt;
+        } else {
+            highwayTargetMarginUsdt = highwayPyramidMarginUsdt;
+            highwayTargetNotionalUsdt = highwayPyramidTargetNotionalUsdt;
+        }
+    }
 
     let preLotNotionalUsdt: number;
     let limitingAuthority = "unknown";
@@ -578,7 +734,9 @@ export function evaluateEquityAdaptiveSizing(
         const policyRequested =
             input.policyRequestedNotionalUsdt ?? Number.POSITIVE_INFINITY;
         const entryCandidates = [
-            ...(isHighway ? [{ key: "highway_initial_target", value: highwayInitialTargetUsdt }] : []),
+            ...(isHighway
+                ? [{ key: "highway_initial_target", value: highwayInitialTargetNotionalUsdt }]
+                : []),
             { key: "risk_based_notional", value: riskBasedNotionalUsdt },
             { key: "account_open_risk_cap", value: accountOpenRiskNetNotionalUsdt },
             { key: "equity_initial_cap", value: equityInitialCapUsdt },
@@ -597,7 +755,9 @@ export function evaluateEquityAdaptiveSizing(
     } else if (input.orderKind === "ADVERSE_ADDON") {
         const policyRequested = Math.max(0, input.policyRequestedNotionalUsdt ?? 0);
         const addonCandidates = [
-            ...(isHighway ? [{ key: "highway_defensive_target", value: highwayDefensiveTargetUsdt }] : []),
+            ...(isHighway
+                ? [{ key: "highway_defensive_target", value: highwayDefensiveTargetNotionalUsdt }]
+                : []),
             { key: "max_adverse_addon", value: maxAdverseAddonUsdt },
             { key: "account_open_risk_cap", value: accountOpenRiskNetNotionalUsdt },
             { key: "symbol_capacity", value: remainingSymbolCapacity },
@@ -618,7 +778,9 @@ export function evaluateEquityAdaptiveSizing(
     } else {
         const policyRequested = Math.max(0, input.policyRequestedNotionalUsdt ?? 0);
         const pyramidCandidates = [
-            ...(isHighway ? [{ key: "highway_pyramid_target", value: highwayPyramidTargetUsdt }] : []),
+            ...(isHighway
+                ? [{ key: "highway_pyramid_target", value: highwayPyramidTargetNotionalUsdt }]
+                : []),
             { key: "account_open_risk_cap", value: accountOpenRiskNetNotionalUsdt },
             { key: "symbol_capacity", value: remainingSymbolCapacity },
             { key: "account_capacity", value: remainingAccountCapacity },
@@ -989,6 +1151,9 @@ export function evaluateEquityAdaptiveSizing(
         effectiveLiveCapUsdt: emergency.effectiveLiveCapUsdt,
         ultimateSafetyCapUsdt,
         legacyCapSource: emergency.legacyCapSource,
+        safetyCapRawValue: emergency.safetyCapRawValue,
+        safetyCapUnit: emergency.safetyCapUnit,
+        effectiveSafetyCapNotionalUsdt: emergency.effectiveSafetyCapNotionalUsdt,
         availableBalanceCapUsdt,
         preProbeNotionalUsdt,
         limitingAuthority,
@@ -1007,6 +1172,8 @@ export function evaluateEquityAdaptiveSizing(
         accountOpenRiskAllowedNotionalUsdt,
         isMicroProbe: isMicro,
         collapseRatio,
-        sizingCollapseDetected: false
+        sizingCollapseDetected: false,
+        highwayTargetMarginUsdt,
+        highwayTargetNotionalUsdt
     };
 }

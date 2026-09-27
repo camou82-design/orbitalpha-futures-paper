@@ -195,7 +195,11 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             stair_step_confidence: args.stairStepConfidence ?? null,
             stair_step_block_reason: args.stairStepBlockReason ?? null,
             authoritativeCandleTs: args.authoritativeCandleTs ?? null,
-            closedCandleTs: args.closedCandleTs ?? null
+            closedCandleTs: args.closedCandleTs ?? null,
+            entrySemantic: args.entrySemantic ?? null,
+            isHighwayLineage: args.isHighwayLineage ?? null,
+            v2EntryReason: args.v2EntryReason ?? null,
+            limitingSizingAuthority: args.limitingSizingAuthority ?? null
         };
 
     }
@@ -281,7 +285,11 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
             stair_step_confidence: args.stairStepConfidence ?? null,
             stair_step_block_reason: args.stairStepBlockReason ?? null,
             authoritativeCandleTs: args.authoritativeCandleTs ?? null,
-            closedCandleTs: args.closedCandleTs ?? null
+            closedCandleTs: args.closedCandleTs ?? null,
+            entrySemantic: args.entrySemantic ?? null,
+            isHighwayLineage: args.isHighwayLineage ?? null,
+            v2EntryReason: args.v2EntryReason ?? null,
+            limitingSizingAuthority: args.limitingSizingAuthority ?? null
         };
     }
     return {
@@ -365,6 +373,10 @@ export function buildV2ExecutionAuthorityEnvelope(args: BuildExecutionEnvelopeAr
         stair_step_confidence: args.stairStepConfidence ?? null,
         stair_step_block_reason: args.stairStepBlockReason ?? null,
         authoritativeCandleTs: args.authoritativeCandleTs ?? null,
-        closedCandleTs: args.closedCandleTs ?? null
+        closedCandleTs: args.closedCandleTs ?? null,
+        entrySemantic: args.entrySemantic ?? null,
+        isHighwayLineage: args.isHighwayLineage ?? null,
+        v2EntryReason: args.v2EntryReason ?? null,
+        limitingSizingAuthority: args.limitingSizingAuthority ?? null
     };
 }

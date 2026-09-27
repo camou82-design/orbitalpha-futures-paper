@@ -1486,6 +1486,30 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         (exitPreReversalConfirmed === true &&
             String(exitPreBoxBreakSide) !== "none" &&
             String(exitPreBoxBreakSide).toLowerCase() !== "unknown");
+
+    const highwayDefensiveAddonAuthorityActive =
+        addOnPolicy.allowed === true &&
+        addOnPolicy.addonMode === "CONFIRMED_ADVERSE_ADDON" &&
+        preAddOnPosition != null &&
+        resolveHighwayLineageFromOpenPosition(preAddOnPosition) &&
+        preAddOnPosition.regimeAtEntry !== "RANGE";
+    (v2State as { addOnAuthorityActive?: boolean }).addOnAuthorityActive =
+        highwayDefensiveAddonAuthorityActive;
+    if (highwayDefensiveAddonAuthorityActive) {
+        console.info(
+            JSON.stringify({
+                event: "V2_HIGHWAY_DEFENSIVE_ADDON_BEFORE_SL_PROOF",
+                symbol: String(input.symbol),
+                side: addOnPolicy.side,
+                addon_reason: addOnPolicy.reason,
+                pnl_pct: addOnPolicy.pnlPct,
+                structure_breached: preAddOnPosition?.structureBreached === true,
+                invalidation_breach: exitInvalidationBreachConfirmed,
+                ts: Date.now()
+            })
+        );
+    }
+
     const exitPolicyBase = evaluateV2ExitPolicy({
         symbol: String(input.symbol),
         v2State,
@@ -8939,6 +8963,60 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
                 equityAdaptiveSizingAuthority = sizingResult;
 
+                if (
+                    canonicalHighwayLineageForSizing &&
+                    input.evaluationMode !== "diagnostic" &&
+                    shouldEmitV2Proof(
+                        "V2_HIGHWAY_LINEAGE_AUTHORITY_PROOF",
+                        String(input.symbol),
+                        `${sizingResult.limitingAuthority}|${sizingResult.finalOrderNotionalUsdt}`,
+                        finalDecision === "ENTER"
+                    )
+                ) {
+                    const targetMarginUsdt =
+                        sizingResult.highwayTargetMarginUsdt ?? accountEquityUsdt * 0.25;
+                    const targetNotionalUsdt =
+                        sizingResult.highwayTargetNotionalUsdt ??
+                        targetMarginUsdt * Math.max(1, appliedLeverage);
+                    console.info(
+                        JSON.stringify({
+                            event: "V2_HIGHWAY_LINEAGE_AUTHORITY_PROOF",
+                            symbol: String(input.symbol),
+                            isHighwayLineage: true,
+                            v2EntryReason:
+                                typeof execMetaForHighway.v2EntryReason === "string"
+                                    ? execMetaForHighway.v2EntryReason
+                                    : null,
+                            entrySemantic:
+                                typeof (execution as { entrySemantic?: string }).entrySemantic ===
+                                "string"
+                                    ? (execution as { entrySemantic?: string }).entrySemantic
+                                    : typeof execMetaForHighway.entrySemantic === "string"
+                                      ? execMetaForHighway.entrySemantic
+                                      : null,
+                            equity: accountEquityUsdt,
+                            target_margin_usdt: targetMarginUsdt,
+                            leverage: appliedLeverage,
+                            target_notional_usdt: targetNotionalUsdt,
+                            risk_based_notional_usdt: sizingResult.riskBasedNotionalUsdt,
+                            equity_initial_cap_usdt: sizingResult.equityInitialCapUsdt,
+                            symbol_cap_usdt: sizingResult.symbolCapUsdt,
+                            account_cap_usdt: sizingResult.accountCapUsdt,
+                            safety_cap_raw_value: sizingResult.safetyCapRawValue,
+                            safety_cap_unit: sizingResult.safetyCapUnit,
+                            effective_safety_cap_notional_usdt:
+                                sizingResult.effectiveSafetyCapNotionalUsdt,
+                            final_notional_usdt: sizingResult.finalOrderNotionalUsdt,
+                            actual_margin_usdt: sizingResult.finalRequiredMarginUsdt,
+                            limiting_authority: sizingResult.limitingAuthority,
+                            final_sizing_authority: sizingResult.finalSizingAuthority,
+                            v2_hard_cap_usdt: sizingResult.v2HardCapUsdt,
+                            ultimate_safety_cap_usdt: sizingResult.ultimateSafetyCapUsdt,
+                            ts: Date.now()
+                        })
+                    );
+                }
+
                 if (input.evaluationMode !== "diagnostic") {
                     const rawRiskNotional = sizingResult.riskBasedNotionalUsdt.toFixed(2);
                     const accountCap = sizingResult.accountCapUsdt.toFixed(2);
@@ -11154,14 +11232,26 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 ? (execution as { entrySemantic?: string }).entrySemantic ?? null
                 : null
     });
+    if (assignHighwayLineageOnEnter && equityAdaptiveSizingAuthority) {
+        decision.metadata.limiting_sizing_authority = equityAdaptiveSizingAuthority.limitingAuthority;
+    }
     if (assignHighwayLineageOnEnter) {
         decision.metadata.isHighwayLineage = true;
         const stampedEntrySemantic =
             typeof execMetaForLineagePersist?.entrySemantic === "string"
                 ? execMetaForLineagePersist.entrySemantic
                 : null;
+        const stampedV2EntryReason =
+            typeof execMetaForLineagePersist?.v2EntryReason === "string"
+                ? execMetaForLineagePersist.v2EntryReason
+                : null;
         if (typeof decision.metadata.entrySemantic !== "string" && stampedEntrySemantic) {
             decision.metadata.entrySemantic = stampedEntrySemantic;
+        }
+        if (typeof decision.metadata.v2EntryReason !== "string" && stampedV2EntryReason) {
+            decision.metadata.v2EntryReason = stampedV2EntryReason;
+        } else if (typeof decision.metadata.v2EntryReason !== "string") {
+            decision.metadata.v2EntryReason = "HIGHWAY_CORE_ENTRY";
         }
     } else if (
         !resolveCanonicalHighwayLineage({
@@ -11822,6 +11912,8 @@ export function adaptV2Input(
                     manualAugmentActive: p.manualAugmentActive,
                     isHighwayLineage: resolveHighwayLineageFromOpenPosition(p),
                     entrySemantic: p.entrySemantic,
+                    v2EntryReason: p.v2EntryReason,
+                    regimeAtEntry: p.regimeAtEntry,
                     postShockProbeEpisodeId: p.postShockProbeEpisodeId,
                     postShockProbePromotionState: p.postShockProbePromotionState
                 };

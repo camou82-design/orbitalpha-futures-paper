@@ -124,6 +124,7 @@ export interface EngineV2Position {
     v2EntryReason?: string;
     isHighwayLineage?: boolean;
     entrySemantic?: string;
+    regimeAtEntry?: "RANGE" | "TREND" | "NO_TRADE";
     postShockProbeEpisodeId?: string;
     postShockProbePromotionState?: "PROBE_ONLY" | "STANDARD_PROMOTED";
     /** Probe TP1 주문 제출 완료 여부 (요청 ≠ 체결 분리). */
@@ -298,9 +299,11 @@ export interface LegacyPositionAdapter {
     lifecycleState?: string;
     manualAugmentActive?: boolean;
     entrySemantic?: string;
+    v2EntryReason?: string;
     postShockProbeEpisodeId?: string;
     postShockProbePromotionState?: "PROBE_ONLY" | "STANDARD_PROMOTED";
     isHighwayLineage?: boolean;
+    regimeAtEntry?: "RANGE" | "TREND" | "NO_TRADE";
 }
 
 export interface LegacyResultAdapter {
@@ -1410,6 +1413,7 @@ export type EntryExecutionAuthority = Readonly<{
     closedCandleTs?: number | null;
     entrySemantic?: string;
     isHighwayLineage?: boolean;
+    v2EntryReason?: string;
     postShockProbeEpisodeId?: string;
     postShockProbePromotionState?: "PROBE_ONLY" | "STANDARD_PROMOTED";
 }>;

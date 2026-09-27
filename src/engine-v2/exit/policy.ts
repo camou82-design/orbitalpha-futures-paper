@@ -10,6 +10,7 @@ import {
     evaluatePnlStopMeaningfulMoveGate
 } from "./pnl-stop-gate";
 import { applySoftExitHysteresis } from "./soft-exit-hysteresis";
+import { resolveHighwayLineageFromOpenPosition } from "../highway-core/highway-lineage-authority";
 
 /**
  * BLOCKER 4-20: ordinary BTC/ETH micro-noise must not mutate a live position.
@@ -180,6 +181,17 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
         !shockAgainst &&
         !hasAdverseDirectionalAuthority;
 
+    const highwayThesisValidForGate =
+        hasPosition &&
+        (side === "long" || side === "short") &&
+        resolveHighwayLineageFromOpenPosition(pos ?? undefined) &&
+        pos?.regimeAtEntry !== "RANGE" &&
+        !(pos?.structureBreached === true) &&
+        !args.invalidationBreachConfirmed &&
+        !shockAgainst;
+
+    const thesisValidForPnlGate = rangeThesisValidForGate || highwayThesisValidForGate;
+
     // htfAligned: derive from htf_entry_policy in judgment.
     // ALLOW_ALL → aligned. BLOCK → misaligned. LONG_ONLY / SHORT_ONLY → check side.
     // null/undefined → unknown (gate treats null as "not explicitly blocked").
@@ -257,7 +269,7 @@ export function evaluateV2ExitPolicy(args: EvaluateV2ExitPolicyArgs): V2ExitPoli
         hasAdverseDirectionalAuthority: false,
         thresholdActionCandidate,
         // Thesis context for symbol-agnostic structural hold protection
-        thesisValid: rangeThesisValidForGate,
+        thesisValid: thesisValidForPnlGate,
         htfAligned: htfAlignedForGate,
         confirmedOppositeFts: confirmedOppositeFtsForGate,
         addOnZoneActive: addOnZoneActiveForGate
