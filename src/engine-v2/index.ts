@@ -81,6 +81,7 @@ import {
     resetEthFtsLowerShortStaleState
 } from "./market-judgment/eth-fts-lower-short-stale-release";
 import { evaluateEthDirectionalAuthorityMismatch } from "./market-judgment/eth-directional-authority-reconciler";
+import { resolveFinalRegimeExecutionAuthority } from "./execution/entry-final-regime-authority";
 
 // Tier 5.6: Mandatory Risk Plan Audit (STOP_PRICE_MISSING Hard Block)
 export function ensurePromotedEntryRiskPlan(
@@ -2034,8 +2035,16 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const whipsawShockRecheckActive = judgment.subtype === "WHIPSAW_SHOCK_RECHECK";
     const crashState = String(v2State.crashState ?? "").toUpperCase();
     const pumpStateResolved = String(v2State.pumpState ?? "").toUpperCase();
-    const marketMode = String(judgment.regime ?? "UNKNOWN");
     const activeEngineRouting = String(routing.executor ?? "UNKNOWN");
+    const finalRegimeExecutionAuthority = resolveFinalRegimeExecutionAuthority({
+        canonicalRegime: authoritativeInput.snapshot?.canonicalRegime ?? judgment.regime,
+        regimeFinal: judgment.regime_final ?? judgment.regime,
+        regime: judgment.regime,
+        routerExecutor: activeEngineRouting
+    });
+    const marketMode = finalRegimeExecutionAuthority.market_mode;
+    const hasFinalTrendExecutionAuthority = finalRegimeExecutionAuthority.has_final_trend_execution_authority;
+    const rangeToTrendPromotionApplicable = finalRegimeExecutionAuthority.range_to_trend_promotion_applicable;
     const qualityScore = Number(input.snapshot?.qualityScore ?? 0);
     const trendWeaknessScore = Number(input.snapshot?.trendWeaknessScore ?? 1);
     const emaGap = Number(input.snapshot?.emaGap ?? 0);
@@ -2372,6 +2381,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         (shock === "DOWN" && trendSideCandidate === "short");
     // Paper shock override can force TREND while V2 routeToExecutor stays RANGE — trend authority must not inherit RANGE zone vetoes.
     const trendRoutingAuthority =
+        hasFinalTrendExecutionAuthority ||
         activeEngineRouting === "TREND" ||
         (shock !== "NONE" && trendShockAligned && trendSideCandidate !== "none" && trendOk);
     const isTrendAuthorityCandidate =
@@ -2383,7 +2393,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         (zone === "lower" && rangeSideCandidate === "long") ||
         (zone === "upper" && rangeSideCandidate === "short");
     const rangePromotableContext = rangeSideAligned || rangeEdgeExtreme;
-    const rangeContextActive = activeEngineRouting === "RANGE" || marketMode === "RANGE";
+    const rangeContextActive =
+        rangeToTrendPromotionApplicable &&
+        (activeEngineRouting === "RANGE" || marketMode === "RANGE");
     const shockDownActive = shock === "DOWN";
     const shockUpActive = shock === "UP";
     const shockDownRangeMidWatch =
@@ -3575,6 +3587,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         // --- Hardening 2026-05-10: Detailed Trend Promotion Block Reasons & RANGE Zone Safety ---
         const regimeLabel = String(judgment.regime ?? "");
         const trendPromotionBlockApplies =
+            rangeToTrendPromotionApplicable &&
             !whipsawShockRecheckActive &&
             trendSideCandidate !== "none" &&
             !promotionApplied &&
@@ -6670,6 +6683,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         event: "V2_ENTRY_CANDIDATE_PROMOTION_PROOF",
         symbol: String(input.symbol),
         judgment_regime: judgment.regime,
+        judgment_regime_final: judgment.regime_final,
+        router_executor: activeEngineRouting,
         judgment_subtype: judgment.subtype,
         range_phase: judgment.rangePhase,
         range_side_candidate: rangeSideCandidate,
@@ -10390,12 +10405,35 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         fallbackUsed: rangeMetadataSource === "snapshot_fallback" || rangeMetadataMissingFields.length > 0,
         fallbackFields: rangeMetadataMissingFields
     }));
+    const nativeTrendCandidateForProof =
+        hasFinalTrendExecutionAuthority &&
+        (nativeExecutorEnterAuthority ||
+            (v2DecisionBeforePromotion === "ENTER" && v2SideBeforePromotion !== "none") ||
+            (fastTrendShiftConfirmed && structuralConfirmationProven));
+
+    console.info(JSON.stringify({
+        event: "V2_ENTRY_FINAL_REGIME_AUTHORITY_PROOF",
+        symbol: String(input.symbol),
+        canonical_regime: finalRegimeExecutionAuthority.canonical_regime,
+        regime_final: finalRegimeExecutionAuthority.regime_final,
+        router_executor: finalRegimeExecutionAuthority.router_executor,
+        promotion_gate_applicable: finalRegimeExecutionAuthority.promotion_gate_applicable,
+        promotion_gate_bypass_reason: finalRegimeExecutionAuthority.promotion_gate_bypass_reason,
+        native_trend_candidate: nativeTrendCandidateForProof === true,
+        final_decision: finalDecision,
+        final_side: v2SideAfterPromotion
+    }));
+
     console.info(JSON.stringify({
         event: "V2_AUTHORITY_PROMOTION_FINALIZER_PROOF",
         symbol: String(input.symbol),
         market_mode: marketMode,
+        judgment_regime: judgment.regime,
+        judgment_regime_final: judgment.regime_final,
         active_engine_routing: activeEngineRouting,
         v2_router_executor: activeEngineRouting,
+        range_to_trend_promotion_applicable: rangeToTrendPromotionApplicable,
+        final_trend_execution_authority: hasFinalTrendExecutionAuthority,
         paper_execution_ready: paperExecutionReady,
         signed_execution_ready: signedExecutionReady,
         directional_shock_state: shock,
