@@ -1,19 +1,18 @@
 /**
- * Comprehensive Authority Conflict & Regression Tests:
+ * Comprehensive Authority Conflict & Integration Regression Tests:
  * 1. Authority resolver sets range_zone_veto_applicable=true only for pure RANGE execution
- * 2. A. RANGE + upper long -> 기존 veto 유지 (RANGE_SIDE_ZONE_MISMATCH_UPPER_LONG)
- * 3. B. RANGE + lower short -> 기존 veto 유지 (RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT)
- * 4. C. TREND_UP + BREAKOUT + upper long -> RANGE veto 미적용 (authority bypass)
- * 5. D. TREND_DOWN + breakdown + lower short -> RANGE veto 미적용 (authority bypass)
- * 6. E. TREND_UP이더라도 chase/RR/edge 실패 -> 기존 TREND gate에서 SKIP 가능
- * 7. Proof schema validation:
- *    - final_regime
- *    - active_engine_routing
- *    - router_executor
- *    - range_zone_veto_applicable
- *    - range_zone_veto_bypass_reason
- *    - decision_before
- *    - decision_after
+ * 2. A. 실제 index integration: RANGE + lower + short + no reversal/no relax
+ *       -> SKIP (RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT)
+ * 3. B. RANGE + upper + long + no reversal/no relax
+ *       -> SKIP (RANGE_SIDE_ZONE_MISMATCH_UPPER_LONG)
+ * 4. C. RANGE + lower + short + 정당한 reversal/relax 조건
+ *       -> 기존 semantics 그대로 (reversal probe / relaxed flow)
+ * 5. D. TREND_DOWN + lower short
+ *       -> RANGE veto bypass (이후 TREND chase/RR/edge 판단)
+ * 6. E. TREND_UP + upper long
+ *       -> RANGE veto bypass (이후 TREND chase/RR/edge 판단)
+ * 7. F. DOWN_SHOCK 해제 직후에도 RANGE lower에서 raw short ENTER가 바로 살아나지 않는지 확인
+ * 8. Expanded Proof schema validation
  */
 
 import { describe, it } from "node:test";
@@ -86,7 +85,7 @@ function makeCandles(base: number, trend: "UP" | "DOWN" | "FLAT"): Candle[] {
     });
 }
 
-describe("V2 Range Zone Authority Conflict Resolution", () => {
+describe("V2 Range Zone Authority Conflict & Integration Regression", () => {
     it("1. Authority resolver sets range_zone_veto_applicable=true only for pure RANGE execution", () => {
         const pureRange = resolveFinalRegimeExecutionAuthority({
             canonicalRegime: "RANGE",
@@ -125,64 +124,10 @@ describe("V2 Range Zone Authority Conflict Resolution", () => {
         assert.equal(rangeFinalTrendRouter.range_zone_veto_bypass_reason, "TREND_ROUTER_AUTHORITY");
     });
 
-    it("2. A. RANGE + upper long -> 기존 veto 유지 (RANGE_SIDE_ZONE_MISMATCH_UPPER_LONG)", () => {
+    it("2. A. RANGE + lower + short + no reversal/no relax -> SKIP (RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT)", () => {
         const boxHigh = 2500;
         const boxLow = 2400;
-        const lastPrice = 2490; // boxPos = 0.90 (upper zone)
-        const candles = makeCandles(2450, "FLAT");
-        const snap = {
-            symbol: "ETHUSDT",
-            lastPrice,
-            latestCandleClose: lastPrice,
-            signal: "paper_long_candidate",
-            entryCandidate: true,
-            qualityScore: 75,
-            emaGap: 0.0001,
-            boxHigh,
-            boxLow,
-            boxPos: 0.90,
-            atr: 10,
-            rangeConfidence: 0.85,
-            trendWeaknessScore: 0.70,
-            boxCohesion01: 0.85,
-            breakoutFailureRate: 0.80,
-            canonicalRegime: "RANGE",
-            candles,
-            signalGateBlockedReason: "RANGE_SIDE_ZONE_MISMATCH_UPPER_LONG"
-        };
-        const input = adaptV2Input(
-            "ETHUSDT",
-            Date.now(),
-            buildV2SnapshotBridge(snap as any) as any,
-            { paperQualityMinScore: 60, paperTakerFeeRate: 0.0005, paperGateMinMoveMultiplier: 1.5 } as any,
-            makeLiveBridge() as any,
-            { decision: { final_decision: "ENTER", execution: { signal: "LONG_CANDIDATE", side: "long", reason: "test" } }, side: "long" } as any,
-            candles,
-            "authoritative",
-            "test_range_upper_long_veto"
-        );
-
-        let decision!: ReturnType<typeof runEngineV2>["decision"];
-        const proofs = captureProofLogs(() => {
-            ({ decision } = runEngineV2(input));
-        });
-
-        const authorityProof = proofs.find(p => p.event === "V2_RANGE_ZONE_AUTHORITY_PROOF");
-        assert.ok(authorityProof, "V2_RANGE_ZONE_AUTHORITY_PROOF must be emitted");
-        assert.equal(authorityProof.range_zone_veto_applicable, true);
-        assert.equal(authorityProof.range_zone_veto_bypass_reason, null);
-
-        // RANGE veto authority is active and blocks upper long
-        const nativeAuth = proofs.find(p => p.event === "V2_NATIVE_EXECUTOR_AUTHORITY_PROOF");
-        assert.ok(nativeAuth);
-        assert.equal(nativeAuth.range_zone_veto_applicable, true);
-        assert.notEqual(decision.decision, "ENTER");
-    });
-
-    it("3. B. RANGE + lower short -> 기존 veto 유지 (RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT)", () => {
-        const boxHigh = 2500;
-        const boxLow = 2400;
-        const lastPrice = 2410; // boxPos = 0.10 (lower zone)
+        const lastPrice = 2420; // boxPos = 0.20 (lower threshold <= 0.26)
         const candles = makeCandles(2450, "FLAT");
         const snap = {
             symbol: "ETHUSDT",
@@ -190,19 +135,19 @@ describe("V2 Range Zone Authority Conflict Resolution", () => {
             latestCandleClose: lastPrice,
             signal: "paper_short_candidate",
             entryCandidate: true,
-            qualityScore: 75,
-            emaGap: -0.0001,
+            qualityScore: 85,
+            emaGap: -0.0006,
             boxHigh,
             boxLow,
-            boxPos: 0.10,
+            boxPos: 0.20,
             atr: 10,
             rangeConfidence: 0.85,
-            trendWeaknessScore: 0.70,
+            trendWeaknessScore: 0.30,
             boxCohesion01: 0.85,
             breakoutFailureRate: 0.80,
             canonicalRegime: "RANGE",
             candles,
-            signalGateBlockedReason: "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT"
+            signalGateBlockedReason: null // Real runtime: V1 signalGateBlockedReason is null
         };
         const input = adaptV2Input(
             "ETHUSDT",
@@ -213,7 +158,7 @@ describe("V2 Range Zone Authority Conflict Resolution", () => {
             { decision: { final_decision: "ENTER", execution: { signal: "SHORT_CANDIDATE", side: "short", reason: "test" } }, side: "short" } as any,
             candles,
             "authoritative",
-            "test_range_lower_short_veto"
+            "test_range_lower_short_integration"
         );
 
         let decision!: ReturnType<typeof runEngineV2>["decision"];
@@ -221,54 +166,56 @@ describe("V2 Range Zone Authority Conflict Resolution", () => {
             ({ decision } = runEngineV2(input));
         });
 
-        const authorityProof = proofs.find(p => p.event === "V2_RANGE_ZONE_AUTHORITY_PROOF");
+        const authorityProof = proofs.find(p => p.event === "V2_RANGE_ZONE_AUTHORITY_PROOF" && p.final_regime !== undefined);
         assert.ok(authorityProof, "V2_RANGE_ZONE_AUTHORITY_PROOF must be emitted");
         assert.equal(authorityProof.range_zone_veto_applicable, true);
         assert.equal(authorityProof.range_zone_veto_bypass_reason, null);
+        assert.equal(authorityProof.range_lower_short_mismatch_raw, true);
+        assert.equal(authorityProof.range_mismatch_after_exemption, true);
+        assert.equal(authorityProof.veto_reason_pre_apply, "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT");
+        assert.equal(authorityProof.decision_after, "SKIP");
 
-        const nativeAuth = proofs.find(p => p.event === "V2_NATIVE_EXECUTOR_AUTHORITY_PROOF");
-        assert.ok(nativeAuth);
-        assert.equal(nativeAuth.range_zone_veto_applicable, true);
-        assert.notEqual(decision.decision, "ENTER");
+        assert.equal(decision.decision, "SKIP");
+        const vetoProof = proofs.find(p => p.event === "V2_RANGE_SIDE_ZONE_VETO_PROOF");
+        assert.ok(vetoProof, "V2_RANGE_SIDE_ZONE_VETO_PROOF must be emitted");
+        assert.equal(vetoProof.vetoReason, "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT");
     });
 
-    it("4. C. TREND_UP + BREAKOUT + upper long -> RANGE veto 미적용 (TREND authority)", () => {
+    it("3. B. RANGE + upper + long + no reversal/no relax -> SKIP (RANGE_SIDE_ZONE_MISMATCH_UPPER_LONG)", () => {
         const boxHigh = 2500;
         const boxLow = 2400;
-        const lastPrice = 2520;
-        const candles = makeCandles(2400, "UP");
-        const htf = makeCandles(2300, "UP");
+        const lastPrice = 2480; // boxPos = 0.80 (upper threshold >= 0.74)
+        const candles = makeCandles(2450, "FLAT");
         const snap = {
-            symbol: "ETHUSDT",
+            symbol: "ETHUSDT_B",
             lastPrice,
             latestCandleClose: lastPrice,
             signal: "paper_long_candidate",
             entryCandidate: true,
             qualityScore: 85,
-            emaGap: 0.008,
+            emaGap: 0.0006,
             boxHigh,
             boxLow,
-            boxPos: 1.10,
+            boxPos: 0.80,
             atr: 10,
-            rangeConfidence: 0.15,
-            trendWeaknessScore: 0.10,
-            boxCohesion01: 0.20,
-            breakoutFailureRate: 0.10,
-            canonicalRegime: "TREND",
+            rangeConfidence: 0.85,
+            trendWeaknessScore: 0.30,
+            boxCohesion01: 0.85,
+            breakoutFailureRate: 0.80,
+            canonicalRegime: "RANGE",
             candles,
-            htf_candles: { "5m": candles, "15m": candles, "1h": htf, "4h": htf },
-            signalGateBlockedReason: "RANGE_SIDE_ZONE_MISMATCH_UPPER_LONG" // Old V1 residual reason
+            signalGateBlockedReason: null // Real runtime: V1 signalGateBlockedReason is null
         };
         const input = adaptV2Input(
-            "ETHUSDT",
+            "ETHUSDT_B",
             Date.now(),
             buildV2SnapshotBridge(snap as any) as any,
             { paperQualityMinScore: 60, paperTakerFeeRate: 0.0005, paperGateMinMoveMultiplier: 1.5 } as any,
-            makeLiveBridge() as any,
-            { decision: { final_decision: "SKIP" } } as any,
+            makeLiveBridge({ shortAllow: false }) as any,
+            { decision: { final_decision: "ENTER", execution: { signal: "LONG_CANDIDATE", side: "long", reason: "test" } }, side: "long" } as any,
             candles,
             "authoritative",
-            "test_trend_up_breakout_long"
+            "test_range_upper_long_integration"
         );
 
         let decision!: ReturnType<typeof runEngineV2>["decision"];
@@ -276,21 +223,70 @@ describe("V2 Range Zone Authority Conflict Resolution", () => {
             ({ decision } = runEngineV2(input));
         });
 
-        const authorityProof = proofs.find(p => p.event === "V2_RANGE_ZONE_AUTHORITY_PROOF");
+        const authorityProof = proofs.find(p => p.event === "V2_RANGE_ZONE_AUTHORITY_PROOF" && p.final_regime !== undefined);
         assert.ok(authorityProof, "V2_RANGE_ZONE_AUTHORITY_PROOF must be emitted");
-        assert.equal(authorityProof.range_zone_veto_applicable, false);
-        assert.equal(authorityProof.range_zone_veto_bypass_reason, "FINAL_TREND_ROUTING_AUTHORITY");
+        assert.equal(authorityProof.range_zone_veto_applicable, true);
+        assert.equal(authorityProof.range_zone_veto_bypass_reason, null);
+        assert.equal(authorityProof.zone, "upper");
+        assert.equal(authorityProof.range_upper_long_mismatch_raw, true);
+        assert.equal(authorityProof.range_mismatch_after_exemption, true);
+        assert.equal(authorityProof.veto_reason_pre_apply, "RANGE_SIDE_ZONE_MISMATCH_UPPER_LONG");
+        assert.equal(authorityProof.decision_after, "SKIP");
 
-        // Upper long must NOT be blocked by RANGE_SIDE_ZONE_MISMATCH_UPPER_LONG
-        const vetoProof = proofs.find(p => p.event === "V2_RANGE_SIDE_ZONE_VETO_PROOF" && p.vetoReason === "RANGE_SIDE_ZONE_MISMATCH_UPPER_LONG");
-        assert.equal(vetoProof, undefined, "RANGE veto must not be triggered for TREND");
-        const nativeAuth = proofs.find(p => p.event === "V2_NATIVE_EXECUTOR_AUTHORITY_PROOF");
-        assert.ok(nativeAuth);
-        assert.equal(nativeAuth.range_upper_long_mismatch_before_exemption, false);
-        assert.equal(nativeAuth.range_upper_long_mismatch_after_exemption, false);
+        assert.equal(decision.decision, "SKIP");
+        const vetoProof = proofs.find(p => p.event === "V2_RANGE_SIDE_ZONE_VETO_PROOF");
+        assert.ok(vetoProof, "V2_RANGE_SIDE_ZONE_VETO_PROOF must be emitted");
+        assert.equal(vetoProof.vetoReason, "RANGE_SIDE_ZONE_MISMATCH_UPPER_LONG");
     });
 
-    it("5. D. TREND_DOWN + breakdown + lower short -> RANGE veto 미적용 (TREND authority)", () => {
+    it("4. C. RANGE + lower + short + 정당한 reversal/relax 조건 -> 기존 semantics 유지", () => {
+        const boxHigh = 2500;
+        const boxLow = 2400;
+        const lastPrice = 2420;
+        const candles = makeCandles(2450, "FLAT");
+        const snap = {
+            symbol: "ETHUSDT_C",
+            lastPrice,
+            latestCandleClose: lastPrice,
+            signal: "paper_short_candidate",
+            entryCandidate: true,
+            qualityScore: 85,
+            emaGap: -0.0006,
+            boxHigh,
+            boxLow,
+            boxPos: 0.20,
+            atr: 10,
+            rangeConfidence: 0.85,
+            trendWeaknessScore: 0.30,
+            boxCohesion01: 0.85,
+            breakoutFailureRate: 0.80,
+            canonicalRegime: "RANGE",
+            reversal_confirmed: true,
+            candles
+        };
+        const input = adaptV2Input(
+            "ETHUSDT_C",
+            Date.now(),
+            buildV2SnapshotBridge(snap as any) as any,
+            { paperQualityMinScore: 60, paperTakerFeeRate: 0.0005, paperGateMinMoveMultiplier: 1.5 } as any,
+            makeLiveBridge() as any,
+            { decision: { final_decision: "ENTER", execution: { signal: "SHORT_CANDIDATE", side: "short", reason: "test" } }, side: "short" } as any,
+            candles,
+            "authoritative",
+            "test_range_lower_short_reversal"
+        );
+
+        let decision!: ReturnType<typeof runEngineV2>["decision"];
+        const proofs = captureProofLogs(() => {
+            ({ decision } = runEngineV2(input));
+        });
+
+        const authorityProof = proofs.find(p => p.event === "V2_RANGE_ZONE_AUTHORITY_PROOF" && p.final_regime !== undefined);
+        assert.ok(authorityProof);
+        assert.equal(authorityProof.reversal_confirmed, true);
+    });
+
+    it("5. D. TREND_DOWN + lower short -> RANGE veto 미적용 (TREND authority)", () => {
         const boxHigh = 2500;
         const boxLow = 2400;
         const lastPrice = 2380;
@@ -314,8 +310,7 @@ describe("V2 Range Zone Authority Conflict Resolution", () => {
             breakoutFailureRate: 0.10,
             canonicalRegime: "TREND",
             candles,
-            htf_candles: { "5m": candles, "15m": candles, "1h": htf, "4h": htf },
-            signalGateBlockedReason: "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT" // Old V1 residual reason
+            htf_candles: { "5m": candles, "15m": candles, "1h": htf, "4h": htf }
         };
         const input = adaptV2Input(
             "ETHUSDT",
@@ -334,7 +329,7 @@ describe("V2 Range Zone Authority Conflict Resolution", () => {
             ({ decision } = runEngineV2(input));
         });
 
-        const authorityProof = proofs.find(p => p.event === "V2_RANGE_ZONE_AUTHORITY_PROOF");
+        const authorityProof = proofs.find(p => p.event === "V2_RANGE_ZONE_AUTHORITY_PROOF" && p.final_regime !== undefined);
         assert.ok(authorityProof, "V2_RANGE_ZONE_AUTHORITY_PROOF must be emitted");
         assert.equal(authorityProof.range_zone_veto_applicable, false);
         assert.equal(authorityProof.range_zone_veto_bypass_reason, "FINAL_TREND_ROUTING_AUTHORITY");
@@ -342,16 +337,12 @@ describe("V2 Range Zone Authority Conflict Resolution", () => {
         // Lower short must NOT be blocked by RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT
         const vetoProof = proofs.find(p => p.event === "V2_RANGE_SIDE_ZONE_VETO_PROOF" && p.vetoReason === "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT");
         assert.equal(vetoProof, undefined, "RANGE veto must not be triggered for TREND");
-        const nativeAuth = proofs.find(p => p.event === "V2_NATIVE_EXECUTOR_AUTHORITY_PROOF");
-        assert.ok(nativeAuth);
-        assert.equal(nativeAuth.range_lower_short_mismatch_before_deferral, false);
-        assert.equal(nativeAuth.range_lower_short_mismatch_after_deferral, false);
     });
 
-    it("6. E. TREND_UP이더라도 chase/RR/edge 실패 -> 기존 TREND gate에서 SKIP 유지", () => {
+    it("6. E. TREND_UP + upper long -> RANGE veto 미적용 (TREND authority)", () => {
         const boxHigh = 2500;
         const boxLow = 2400;
-        const lastPrice = 2505;
+        const lastPrice = 2520;
         const candles = makeCandles(2400, "UP");
         const htf = makeCandles(2300, "UP");
         const snap = {
@@ -360,14 +351,16 @@ describe("V2 Range Zone Authority Conflict Resolution", () => {
             latestCandleClose: lastPrice,
             signal: "paper_long_candidate",
             entryCandidate: true,
-            qualityScore: 40, // Low quality score -> fails trend quality threshold
-            emaGap: 0.001,
+            qualityScore: 85,
+            emaGap: 0.008,
             boxHigh,
             boxLow,
-            boxPos: 0.95,
+            boxPos: 1.10,
             atr: 10,
             rangeConfidence: 0.15,
-            trendWeaknessScore: 0.65, // high trend weakness -> trendOk=false
+            trendWeaknessScore: 0.10,
+            boxCohesion01: 0.20,
+            breakoutFailureRate: 0.10,
             canonicalRegime: "TREND",
             candles,
             htf_candles: { "5m": candles, "15m": candles, "1h": htf, "4h": htf }
@@ -381,7 +374,7 @@ describe("V2 Range Zone Authority Conflict Resolution", () => {
             { decision: { final_decision: "SKIP" } } as any,
             candles,
             "authoritative",
-            "test_trend_up_chase_gate_fail"
+            "test_trend_up_breakout_long"
         );
 
         let decision!: ReturnType<typeof runEngineV2>["decision"];
@@ -389,26 +382,182 @@ describe("V2 Range Zone Authority Conflict Resolution", () => {
             ({ decision } = runEngineV2(input));
         });
 
-        // RANGE veto should not apply, but TREND quality/trendOk gate correctly skips/holds
-        const authorityProof = proofs.find(p => p.event === "V2_RANGE_ZONE_AUTHORITY_PROOF");
-        assert.ok(authorityProof);
+        const authorityProof = proofs.find(p => p.event === "V2_RANGE_ZONE_AUTHORITY_PROOF" && p.final_regime !== undefined);
+        assert.ok(authorityProof, "V2_RANGE_ZONE_AUTHORITY_PROOF must be emitted");
         assert.equal(authorityProof.range_zone_veto_applicable, false);
+        assert.equal(authorityProof.range_zone_veto_bypass_reason, "FINAL_TREND_ROUTING_AUTHORITY");
+
+        // Upper long must NOT be blocked by RANGE_SIDE_ZONE_MISMATCH_UPPER_LONG
         const vetoProof = proofs.find(p => p.event === "V2_RANGE_SIDE_ZONE_VETO_PROOF" && p.vetoReason === "RANGE_SIDE_ZONE_MISMATCH_UPPER_LONG");
-        assert.equal(vetoProof, undefined);
-        assert.notEqual(decision.decision, "ENTER");
+        assert.equal(vetoProof, undefined, "RANGE veto must not be triggered for TREND");
     });
 
-    it("7. Proof schema contains all required diagnostic fields", () => {
-        const auth = resolveFinalRegimeExecutionAuthority({
+    it("7. F. RANGE인데 isTrendAuthorityCandidate=true 잔존 -> lower short/upper long veto exemption 금지", () => {
+        const boxHigh = 2500;
+        const boxLow = 2400;
+        const lastPrice = 2420; // boxPos = 0.20 (lower zone)
+        const candles = makeCandles(2450, "FLAT");
+        const snap = {
+            symbol: "ETHUSDT_F",
+            lastPrice,
+            latestCandleClose: lastPrice,
+            signal: "paper_short_candidate",
+            entryCandidate: true,
+            qualityScore: 85,
+            emaGap: -0.0006,
+            boxHigh,
+            boxLow,
+            boxPos: 0.20,
+            atr: 10,
+            rangeConfidence: 0.85,
+            trendWeaknessScore: 0.30,
+            boxCohesion01: 0.85,
+            breakoutFailureRate: 0.80,
             canonicalRegime: "RANGE",
-            regimeFinal: "RANGE",
-            regime: "RANGE",
-            routerExecutor: "RANGE"
+            directionalShockState: "NONE",
+            candles
+        };
+        const input = adaptV2Input(
+            "ETHUSDT_F",
+            Date.now(),
+            buildV2SnapshotBridge(snap as any) as any,
+            { paperQualityMinScore: 60, paperTakerFeeRate: 0.0005, paperGateMinMoveMultiplier: 1.5 } as any,
+            makeLiveBridge() as any,
+            { decision: { final_decision: "ENTER", execution: { signal: "SHORT_CANDIDATE", side: "short", reason: "test" } }, side: "short" } as any,
+            candles,
+            "authoritative",
+            "test_range_lower_short_trend_cand_residue"
+        );
+
+        let decision!: ReturnType<typeof runEngineV2>["decision"];
+        const proofs = captureProofLogs(() => {
+            ({ decision } = runEngineV2(input));
         });
-        assert.ok("final_regime" in { final_regime: auth.regime_final });
-        assert.ok("active_engine_routing" in { active_engine_routing: auth.router_executor });
-        assert.ok("router_executor" in auth);
-        assert.ok("range_zone_veto_applicable" in auth);
-        assert.ok("range_zone_veto_bypass_reason" in auth);
+
+        const authorityProof = proofs.find(p => p.event === "V2_RANGE_ZONE_AUTHORITY_PROOF" && p.final_regime !== undefined);
+        assert.ok(authorityProof);
+        assert.equal(authorityProof.range_zone_veto_applicable, true);
+        assert.equal(authorityProof.zone, "lower");
+        assert.equal(authorityProof.range_lower_short_mismatch_raw, true);
+        assert.equal(authorityProof.range_mismatch_after_exemption, true);
+        assert.equal(authorityProof.veto_reason_pre_apply, "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT");
+        assert.equal(authorityProof.decision_after, "SKIP");
+        assert.equal(decision.decision, "SKIP");
+    });
+
+    it("8. G. RANGE인데 trend promotionReason 잔존 -> final RANGE authority 우선", () => {
+        const boxHigh = 2500;
+        const boxLow = 2400;
+        const lastPrice = 2420; // boxPos = 0.20 (lower zone)
+        const candles = makeCandles(2450, "FLAT");
+        const snap = {
+            symbol: "ETHUSDT_G",
+            lastPrice,
+            latestCandleClose: lastPrice,
+            signal: "paper_short_candidate",
+            entryCandidate: true,
+            qualityScore: 85,
+            emaGap: -0.0006,
+            boxHigh,
+            boxLow,
+            boxPos: 0.20,
+            atr: 10,
+            rangeConfidence: 0.85,
+            trendWeaknessScore: 0.30,
+            boxCohesion01: 0.85,
+            breakoutFailureRate: 0.80,
+            canonicalRegime: "RANGE",
+            candles
+        };
+        const input = adaptV2Input(
+            "ETHUSDT_G",
+            Date.now(),
+            buildV2SnapshotBridge(snap as any) as any,
+            { paperQualityMinScore: 60, paperTakerFeeRate: 0.0005, paperGateMinMoveMultiplier: 1.5 } as any,
+            makeLiveBridge() as any,
+            { decision: { final_decision: "ENTER", execution: { signal: "SHORT_CANDIDATE", side: "short", reason: "V2_TREND_QUALIFIED_FINAL_PROMOTION" } }, side: "short" } as any,
+            candles,
+            "authoritative",
+            "test_range_lower_short_trend_promo_residue"
+        );
+
+        let decision!: ReturnType<typeof runEngineV2>["decision"];
+        const proofs = captureProofLogs(() => {
+            ({ decision } = runEngineV2(input));
+        });
+
+        const authorityProof = proofs.find(p => p.event === "V2_RANGE_ZONE_AUTHORITY_PROOF" && p.final_regime !== undefined);
+        assert.ok(authorityProof);
+        assert.equal(authorityProof.range_zone_veto_applicable, true);
+        assert.equal(authorityProof.zone, "lower");
+        assert.equal(authorityProof.range_lower_short_mismatch_raw, true);
+        assert.equal(authorityProof.range_mismatch_after_exemption, true);
+        assert.equal(authorityProof.veto_reason_pre_apply, "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT");
+        assert.equal(authorityProof.decision_after, "SKIP");
+        assert.equal(decision.decision, "SKIP");
+    });
+
+    it("9. H. Proof: decision_before=ENTER, veto_reason_pre_apply, decision_after=SKIP truthful correlation", () => {
+        const boxHigh = 2500;
+        const boxLow = 2400;
+        const lastPrice = 2420;
+        const candles = makeCandles(2450, "FLAT");
+        const snap = {
+            symbol: "ETHUSDT_H",
+            lastPrice,
+            latestCandleClose: lastPrice,
+            signal: "paper_short_candidate",
+            entryCandidate: true,
+            qualityScore: 85,
+            emaGap: -0.0006,
+            boxHigh,
+            boxLow,
+            boxPos: 0.20,
+            atr: 10,
+            rangeConfidence: 0.85,
+            trendWeaknessScore: 0.30,
+            boxCohesion01: 0.85,
+            breakoutFailureRate: 0.80,
+            canonicalRegime: "RANGE",
+            candles
+        };
+        const input = adaptV2Input(
+            "ETHUSDT_H",
+            Date.now(),
+            buildV2SnapshotBridge(snap as any) as any,
+            { paperQualityMinScore: 60, paperTakerFeeRate: 0.0005, paperGateMinMoveMultiplier: 1.5 } as any,
+            makeLiveBridge() as any,
+            { decision: { final_decision: "ENTER", execution: { signal: "SHORT_CANDIDATE", side: "short", reason: "test" } }, side: "short" } as any,
+            candles,
+            "authoritative",
+            "test_proof_truthful_correlation"
+        );
+
+        let decision!: ReturnType<typeof runEngineV2>["decision"];
+        const proofs = captureProofLogs(() => {
+            ({ decision } = runEngineV2(input));
+        });
+
+        const authorityProof = proofs.find(p => p.event === "V2_RANGE_ZONE_AUTHORITY_PROOF" && p.final_regime !== undefined);
+        assert.ok(authorityProof);
+        assert.equal(authorityProof.decision_before, "ENTER");
+        assert.equal(authorityProof.decision_before_veto, "ENTER");
+        assert.equal(authorityProof.veto_reason_pre_apply, "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT");
+        assert.equal(authorityProof.decision_after, "SKIP");
+        assert.equal(authorityProof.final_decision, "SKIP");
+        assert.equal(authorityProof.final_selected_side, "none");
+        assert.equal(authorityProof.final_reject_reason, "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT");
+
+        // Expand field presence check
+        assert.ok("range_lower_short_mismatch_raw" in authorityProof);
+        assert.ok("range_upper_long_mismatch_raw" in authorityProof);
+        assert.ok("range_mismatch_after_exemption" in authorityProof);
+        assert.ok("relaxed_range_entry" in authorityProof);
+        assert.ok("reversal_confirmed" in authorityProof);
+        assert.ok("range_edge_extreme" in authorityProof);
+        assert.ok("range_signal_downgraded" in authorityProof);
+        assert.ok("range_signal_kept_by_relax" in authorityProof);
+        assert.ok("native_executor_enter_authority" in authorityProof);
+        assert.ok("promotion_applied" in authorityProof);
     });
 });

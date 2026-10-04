@@ -204,6 +204,9 @@ export interface LegacySnapshotAdapter {
     retestConfirmed?: boolean;
     retestTouched?: boolean;
     retestRejected?: boolean;
+    reversal_confirmed?: boolean;
+    reversalConfirmed?: boolean;
+    relaxedRangeEntry?: boolean;
     signal?: string;
     qualityScore?: number;
     data_ready?: boolean;
@@ -477,6 +480,9 @@ export interface EngineV2SnapshotAdapter {
     retestConfirmed?: boolean;
     retestTouched?: boolean;
     retestRejected?: boolean;
+    reversal_confirmed?: boolean;
+    reversalConfirmed?: boolean;
+    relaxedRangeEntry?: boolean;
     rcSlope?: number;
     candles?: import("../../models/types").Candle[];
     htf_candles?: Record<string, import("../../models/types").Candle[]>;
@@ -584,6 +590,9 @@ export interface V2BridgeSnapshot {
     retestConfirmed?: boolean;
     retestTouched?: boolean;
     retestRejected?: boolean;
+    reversal_confirmed?: boolean;
+    reversalConfirmed?: boolean;
+    relaxedRangeEntry?: boolean;
     signal: string;
     qualityScore: number;
     swingHighSlope: number;

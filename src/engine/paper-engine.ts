@@ -26737,6 +26737,8 @@ export function buildV2SnapshotBridge(snap: SymbolSnapshotLike): V2BridgeSnapsho
     retestConfirmed: snap.retestConfirmed === true,
     retestTouched: snap.retestTouched === true,
     retestRejected: snap.retestRejected === true,
+    reversal_confirmed: (snap as any).reversal_confirmed === true || (snap as any).reversalConfirmed === true,
+    relaxedRangeEntry: (snap as any).relaxedRangeEntry === true,
     signal: snap.signal ?? "NONE",
     qualityScore: snap.qualityScore ?? 0,
     entryCandidate: snap.entryCandidate ?? false,

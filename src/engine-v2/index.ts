@@ -2105,8 +2105,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const rangeConfidence = readNullableNumber(execMeta.rangeConfidence, input.snapshot?.rangeConfidence);
     const boxCohesion01 = readNullableNumber(execMeta.boxCohesion01, input.snapshot?.boxCohesion01);
     const trendWeaknessFromMeta = readNullableNumber(execMeta.trendWeaknessScore, input.snapshot?.trendWeaknessScore);
-    const relaxedRangeEntry = readNullableBoolean(execMeta.relaxedRangeEntry) === true;
-    const reversalConfirmed = readNullableBoolean(execMeta.reversal_confirmed) === true;
+    const relaxedRangeEntry = readNullableBoolean(execMeta.relaxedRangeEntry, input.snapshot?.relaxedRangeEntry) === true;
+    const reversalConfirmed = readNullableBoolean(execMeta.reversal_confirmed, input.snapshot?.reversal_confirmed, (input.snapshot as any)?.reversalConfirmed) === true;
     const overshootReclaimConfirmed = readNullableBoolean(execMeta.overshoot_reclaim_confirmed) === true;
     const reversalAuthorityConfirmed =
         reversalConfirmed ||
@@ -6055,15 +6055,16 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const rangeZoneVetoApplicable = finalRegimeExecutionAuthority.range_zone_veto_applicable;
     const rangeZoneVetoBypassReason = finalRegimeExecutionAuthority.range_zone_veto_bypass_reason;
     const isRangeRouting = rangeZoneVetoApplicable;
-    const isMicroProbePromotion = promotionReason === "CONTINUATION_MICRO_PROBE";
-    const isStairStepPromotion = promotionReason === "V2_STAIR_STEP_CONTINUATION_PROMOTION";
-    const isTrendContinuationRevalidatedPromotion = promotionReason === "V2_TREND_CONTINUATION_REVALIDATED";
-    const isConflictResolvedTrendLongPromotion = promotionReason === "V2_CONFLICT_RESOLVED_TREND_LONG";
-    const isConflictResolvedTrendShortPromotion = promotionReason === "V2_CONFLICT_RESOLVED_TREND_SHORT";
+    const isMicroProbePromotion = !rangeZoneVetoApplicable && promotionReason === "CONTINUATION_MICRO_PROBE";
+    const isStairStepPromotion = !rangeZoneVetoApplicable && promotionReason === "V2_STAIR_STEP_CONTINUATION_PROMOTION";
+    const isTrendContinuationRevalidatedPromotion = !rangeZoneVetoApplicable && promotionReason === "V2_TREND_CONTINUATION_REVALIDATED";
+    const isConflictResolvedTrendLongPromotion = !rangeZoneVetoApplicable && promotionReason === "V2_CONFLICT_RESOLVED_TREND_LONG";
+    const isConflictResolvedTrendShortPromotion = !rangeZoneVetoApplicable && promotionReason === "V2_CONFLICT_RESOLVED_TREND_SHORT";
     const isRangeTrendReclaimProbePromotion = promotionReason === "V2_RANGE_TREND_RECLAIM_MICRO_PROBE";
     const isTrendQualifiedFinalPromotion =
-        promotionReason === "V2_TREND_QUALIFIED_FINAL_PROMOTION" ||
-        (isTrendAuthorityCandidate && promotionApplied === true);
+        !rangeZoneVetoApplicable &&
+        (promotionReason === "V2_TREND_QUALIFIED_FINAL_PROMOTION" ||
+        (isTrendAuthorityCandidate && promotionApplied === true));
     const rangeZoneVetoExempt =
         isMicroProbePromotion ||
         isRangeTrendReclaimProbePromotion ||
@@ -6080,29 +6081,23 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             execMetaRecord.early_probe === true);
     const isNonRangeExecutionLineage =
         !rangeZoneVetoApplicable ||
-        isTrendAuthorityCandidate ||
         rangeZoneVetoExempt ||
         isConflictResolvedTrendLongPromotion ||
         isConflictResolvedTrendShortPromotion ||
-        nativeExecutorFastProbeCoverage ||
-        (nativeExecutorEnterAuthority && (
-            String(execution.reason ?? "").toLowerCase().includes("trend") ||
-            String(execution.reason ?? "").toLowerCase().includes("continuation") ||
-            String(execution.reason ?? "").toLowerCase().includes("breakout") ||
-            String(execution.reason ?? "").toLowerCase().includes("breakdown") ||
-            String(execution.reason ?? "").toLowerCase().includes("fast_shift") ||
-            String(judgment.subtype ?? "").includes("TREND") ||
-            String(judgment.subtype ?? "").includes("BREAKOUT") ||
-            String(judgment.subtype ?? "").includes("BREAKDOWN") ||
-            execMetaRecord.trend_continuation === true ||
-            execMetaRecord.fast_trend_shift === true
-        ));
+        (!rangeZoneVetoApplicable && nativeExecutorFastProbeCoverage);
 
-    const rangeLowerShortMismatchBeforeExemption =
+    const rangeLowerShortMismatchRaw =
         rangeZoneVetoApplicable &&
-        !isNonRangeExecutionLineage &&
         sideCandidateBeforeVeto === "short" &&
         (rangeLowerShortMismatchByReason || (boxPos ?? 0.5) <= rangeLowerThreshold);
+
+    const rangeUpperLongMismatchRaw =
+        rangeZoneVetoApplicable &&
+        sideCandidateBeforeVeto === "long" &&
+        (rangeUpperLongMismatchByReason || (boxPos ?? 0.5) >= rangeUpperThreshold);
+
+    const rangeLowerShortMismatchBeforeExemption =
+        rangeLowerShortMismatchRaw && !isNonRangeExecutionLineage;
     const nativeFtsLowerShortDeferZoneVeto =
         !ethFtsLowerShortStaleActive &&
         nativeExecutorEnterAuthority === true &&
@@ -6223,10 +6218,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
               nativeUpperBreakoutContinuationEval.holdReason ??
               null;
     const rangeUpperLongMismatchBeforeExemption =
-        rangeZoneVetoApplicable &&
-        !isNonRangeExecutionLineage &&
-        sideCandidateBeforeVeto === "long" &&
-        (rangeUpperLongMismatchByReason || (boxPos ?? 0.5) >= rangeUpperThreshold);
+        rangeUpperLongMismatchRaw && !isNonRangeExecutionLineage;
     const rangeUpperLongMismatch =
         rangeUpperLongMismatchBeforeExemption &&
         !nativeExecutorUpperBreakoutConfirmed &&
@@ -6286,20 +6278,6 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
     }
 
-    console.info(JSON.stringify({
-        event: "V2_RANGE_ZONE_AUTHORITY_PROOF",
-        symbol: String(input.symbol),
-        final_regime: finalRegimeExecutionAuthority.regime_final,
-        active_engine_routing: activeEngineRouting,
-        router_executor: finalRegimeExecutionAuthority.router_executor,
-        range_zone_veto_applicable: rangeZoneVetoApplicable,
-        range_zone_veto_bypass_reason: rangeZoneVetoBypassReason,
-        decision_before: finalDecisionBeforeVeto,
-        decision_after: v2DecisionAfterPromotion,
-        zone,
-        selected_side: v2SideAfterPromotion,
-        veto_reason_pre_apply: vetoReason
-    }));
 
     console.info(JSON.stringify({
         event: "V2_NATIVE_EXECUTOR_AUTHORITY_PROOF",
@@ -6708,6 +6686,35 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             }));
         }
     }
+
+    console.info(JSON.stringify({
+        event: "V2_RANGE_ZONE_AUTHORITY_PROOF",
+        symbol: String(input.symbol),
+        final_regime: finalRegimeExecutionAuthority.regime_final,
+        active_engine_routing: activeEngineRouting,
+        router_executor: finalRegimeExecutionAuthority.router_executor,
+        range_zone_veto_applicable: rangeZoneVetoApplicable,
+        range_zone_veto_bypass_reason: rangeZoneVetoBypassReason,
+        zone,
+        selected_side: sideCandidateBeforeVeto,
+        range_lower_short_mismatch_raw: rangeLowerShortMismatchRaw,
+        range_upper_long_mismatch_raw: rangeUpperLongMismatchRaw,
+        range_mismatch_after_exemption: rangeLowerShortMismatch || rangeUpperLongMismatch,
+        relaxed_range_entry: relaxedRangeEntry,
+        reversal_confirmed: reversalConfirmed,
+        range_edge_extreme: rangeEdgeExtreme,
+        range_signal_downgraded: rangeSignalDowngraded,
+        range_signal_kept_by_relax: rangeSignalKeptByRelax,
+        native_executor_enter_authority: nativeExecutorEnterAuthority,
+        promotion_applied: promotionApplied,
+        veto_reason_pre_apply: vetoReason,
+        decision_before: finalDecisionBeforeVeto,
+        decision_before_veto: finalDecisionBeforeVeto,
+        decision_after: v2DecisionAfterPromotion,
+        final_decision: v2DecisionAfterPromotion,
+        final_selected_side: v2SideAfterPromotion,
+        final_reject_reason: v2RejectReasonAfterPromotion
+    }));
 
     // Tier 5+: Selected Side Consistency Log
     console.info(JSON.stringify({
@@ -7150,11 +7157,11 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             (judgment.metadata?.retestRejected === false && judgment.metadata?.retestConfirmed === true && sideFinal === "long");
 
         let mismatchReason: string | null = null;
-        const isStairStepPromotion = promotionReason === "V2_STAIR_STEP_CONTINUATION_PROMOTION";
-        const isTrendContinuationRevalidatedPromotion = promotionReason === "V2_TREND_CONTINUATION_REVALIDATED";
+        const isStairStepPromotion = !rangeZoneVetoApplicable && promotionReason === "V2_STAIR_STEP_CONTINUATION_PROMOTION";
+        const isTrendContinuationRevalidatedPromotion = !rangeZoneVetoApplicable && promotionReason === "V2_TREND_CONTINUATION_REVALIDATED";
         const isPolarityReversalMicroProbePromotion = promotionReason === "V2_POLARITY_REVERSAL_MICRO_PROBE";
-        const isConflictResolvedTrendLongPromotion = promotionReason === "V2_CONFLICT_RESOLVED_TREND_LONG";
-        const isConflictResolvedTrendShortPromotion = promotionReason === "V2_CONFLICT_RESOLVED_TREND_SHORT";
+        const isConflictResolvedTrendLongPromotion = !rangeZoneVetoApplicable && promotionReason === "V2_CONFLICT_RESOLVED_TREND_LONG";
+        const isConflictResolvedTrendShortPromotion = !rangeZoneVetoApplicable && promotionReason === "V2_CONFLICT_RESOLVED_TREND_SHORT";
         const isLowerShortBreakdownContinuationPromotion = promotionReason === "V2_LOWER_SHORT_BREAKDOWN_CONTINUATION_PROMOTION";
         const isUpperLongProbePromotion = promotionReason === "V2_UPPER_LONG_PROBE_PROMOTION";
         const isRangeTrendReclaimProbePromotion = promotionReason === "V2_RANGE_TREND_RECLAIM_MICRO_PROBE";
@@ -12008,6 +12015,8 @@ export function adaptV2Input(
             retestConfirmed: snapshot.retestConfirmed === true,
             retestTouched: snapshot.retestTouched === true,
             retestRejected: snapshot.retestRejected === true,
+            reversal_confirmed: (snapshot as any).reversal_confirmed === true || (snapshot as any).reversalConfirmed === true,
+            relaxedRangeEntry: (snapshot as any).relaxedRangeEntry === true,
             swingHighSlope: snapshot.swingHighSlope ?? 0,
             swingLowSlope: snapshot.swingLowSlope ?? 0,
             rangeCenterSlope: snapshot.rangeCenterSlope ?? 0,
