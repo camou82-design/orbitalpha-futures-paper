@@ -6052,7 +6052,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     let vetoReason: string | null = null;
     const rangeLowerShortMismatchByReason = signalGateBlockedReason === "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT";
     const rangeUpperLongMismatchByReason = signalGateBlockedReason === "RANGE_SIDE_ZONE_MISMATCH_UPPER_LONG";
-    const isRangeRouting = activeEngineRouting === "RANGE";
+    const rangeZoneVetoApplicable = finalRegimeExecutionAuthority.range_zone_veto_applicable;
+    const rangeZoneVetoBypassReason = finalRegimeExecutionAuthority.range_zone_veto_bypass_reason;
+    const isRangeRouting = rangeZoneVetoApplicable;
     const isMicroProbePromotion = promotionReason === "CONTINUATION_MICRO_PROBE";
     const isStairStepPromotion = promotionReason === "V2_STAIR_STEP_CONTINUATION_PROMOTION";
     const isTrendContinuationRevalidatedPromotion = promotionReason === "V2_TREND_CONTINUATION_REVALIDATED";
@@ -6077,6 +6079,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             execMetaRecord.fast_trend_shift === true ||
             execMetaRecord.early_probe === true);
     const isNonRangeExecutionLineage =
+        !rangeZoneVetoApplicable ||
         isTrendAuthorityCandidate ||
         rangeZoneVetoExempt ||
         isConflictResolvedTrendLongPromotion ||
@@ -6096,7 +6099,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         ));
 
     const rangeLowerShortMismatchBeforeExemption =
-        isRangeRouting &&
+        rangeZoneVetoApplicable &&
         !isNonRangeExecutionLineage &&
         sideCandidateBeforeVeto === "short" &&
         (rangeLowerShortMismatchByReason || (boxPos ?? 0.5) <= rangeLowerThreshold);
@@ -6220,7 +6223,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
               nativeUpperBreakoutContinuationEval.holdReason ??
               null;
     const rangeUpperLongMismatchBeforeExemption =
-        isRangeRouting &&
+        rangeZoneVetoApplicable &&
         !isNonRangeExecutionLineage &&
         sideCandidateBeforeVeto === "long" &&
         (rangeUpperLongMismatchByReason || (boxPos ?? 0.5) >= rangeUpperThreshold);
@@ -6242,6 +6245,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             (v2SideBeforePromotion === "long" && v2SideAfterPromotion === "short")
         );
     const rangeDowngradedHardBlock =
+        rangeZoneVetoApplicable &&
         rangeSignalDowngraded &&
         !rangeSignalKeptByRelax &&
         !promotionSideFlipped &&
@@ -6249,12 +6253,14 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         !nativeExecutorEnterAuthority &&
         !(nativeFastTrendShiftUpperLongEval.confirmed === true);
     const entryCandidateHardBlock =
+        rangeZoneVetoApplicable &&
         !entryCandidate &&
         !promotionApplied &&
         !nativeExecutorEnterAuthority &&
         !(nativeFastTrendShiftUpperLongEval.confirmed === true);
     const trendPromotionHardBlock = activeEngineRouting === "TREND" && trendOk !== true && sideCandidateBeforeVeto !== "none";
     const rangeMidConservativeBlock =
+        rangeZoneVetoApplicable &&
         rangeContextActive &&
         zone === "mid" &&
         sideCandidateBeforeVeto !== "none" &&
@@ -6281,9 +6287,29 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     }
 
     console.info(JSON.stringify({
+        event: "V2_RANGE_ZONE_AUTHORITY_PROOF",
+        symbol: String(input.symbol),
+        final_regime: finalRegimeExecutionAuthority.regime_final,
+        active_engine_routing: activeEngineRouting,
+        router_executor: finalRegimeExecutionAuthority.router_executor,
+        range_zone_veto_applicable: rangeZoneVetoApplicable,
+        range_zone_veto_bypass_reason: rangeZoneVetoBypassReason,
+        decision_before: finalDecisionBeforeVeto,
+        decision_after: v2DecisionAfterPromotion,
+        zone,
+        selected_side: v2SideAfterPromotion,
+        veto_reason_pre_apply: vetoReason
+    }));
+
+    console.info(JSON.stringify({
         event: "V2_NATIVE_EXECUTOR_AUTHORITY_PROOF",
         symbol: String(input.symbol),
         market_subtype: judgment.subtype,
+        final_regime: finalRegimeExecutionAuthority.regime_final,
+        active_engine_routing: activeEngineRouting,
+        router_executor: finalRegimeExecutionAuthority.router_executor,
+        range_zone_veto_applicable: rangeZoneVetoApplicable,
+        range_zone_veto_bypass_reason: rangeZoneVetoBypassReason,
         native_executor_enter_authority: nativeExecutorEnterAuthority,
         native_executor_decision_source: nativeExecutorDecisionSource,
         native_executor_side_source: nativeExecutorSideSource,
@@ -6656,6 +6682,13 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 event: "V2_RANGE_SIDE_ZONE_VETO_PROOF",
                 symbol: String(input.symbol),
                 regime: finalRegimeExecutionAuthority.regime_final,
+                final_regime: finalRegimeExecutionAuthority.regime_final,
+                active_engine_routing: activeEngineRouting,
+                router_executor: finalRegimeExecutionAuthority.router_executor,
+                range_zone_veto_applicable: rangeZoneVetoApplicable,
+                range_zone_veto_bypass_reason: rangeZoneVetoBypassReason,
+                decision_before: finalDecisionBeforeVeto,
+                decision_after: v2DecisionAfterPromotion,
                 boxPos,
                 rangeZone: zone,
                 sideCandidate: sideCandidateBeforeVeto,
