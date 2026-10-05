@@ -8273,6 +8273,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     let min_order_check_passed = true;
     let min_order_block_reason: string | null = null;
     let equityAdaptiveSizingAuthority: ReturnType<typeof evaluateEquityAdaptiveSizing> | null = null;
+    let v2PolicyRequestedNotionalUsdt: number | null = null;
     const minProbeMarginKrw = 14000;
     const appliedLeverage = 10;
     const leverageSource = "v2_fixed";
@@ -8905,6 +8906,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                             : ((v2State as any).requestedAddonNotionalUsdt ?? addOnPolicy?.requestedAddonNotionalUsdt ?? 0))
                         : ((v2State as any).finalAddonNotionalUsdt ?? finalAddonNotionalUsdt ?? addOnPolicy?.requestedAddonNotionalUsdt ?? addOnPolicy?.addonMaxNotionalUsdt ?? 0))
                     : (ethInitialTargetNotional ?? null);
+                v2PolicyRequestedNotionalUsdt = policyRequestedNotional;
                 const adverseRiskBudgetAllowedNotional = isAdverseAddon
                     ? (addOnPolicy?.requestedAddonNotionalUsdt ??
                         (addOnPolicy as any)?.riskProjection?.riskBudgetAllowedNotional ??
@@ -8986,7 +8988,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
                 const v2HardSafetyCapUsdt = isEthSymbolForSizing
                     ? ((input.config as any)?.okxLiveV2EthMaxOrderNotionalUsdt ?? (input.config as any)?.okx_live_v2_eth_max_order_notional_usdt ?? 1200)
-                    : ((input.config as any)?.okxLiveV2MaxOrderNotionalUsdt ?? (input.config as any)?.okx_live_v2_max_order_notional_usdt ?? 500);
+                    : ((input.config as any)?.okxLiveV2MaxOrderNotionalUsdt ?? (input.config as any)?.okx_live_v2_max_order_notional_usdt ?? null);
 
                 const execMetaForHighway = (execution?.metadata ?? {}) as Record<string, unknown>;
                 const canonicalHighwayLineageForSizing = isAddOn
@@ -9559,10 +9561,15 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     // Required Proof Log: LIVE_ORDER_SIZING_AUTHORITY_PROOF
     if (input.evaluationMode !== "diagnostic") {
+        const isEthForProof = String(input.symbol).toUpperCase().replace(/[-_]/g, "").replace("SWAP", "") === "ETHUSDT";
+        const btcV2CapUsdt = input.config.okxLiveV2MaxOrderNotionalUsdt ?? null;
+        const ethV2CapUsdt = input.config.okxLiveV2EthMaxOrderNotionalUsdt ?? 1200;
+        const selectedSymbolV2CapUsdt = isEthForProof ? ethV2CapUsdt : btcV2CapUsdt;
         const liveCapProof = resolveUltimateSafetyCapForOrderSizing({
             v2AuthorityEntry: true,
             emergencyCapUsdt: input.config.okxLiveEmergencyMaxOrderNotionalUsdt ?? null,
-            legacyStaticCapUsdt: maxOrderNotionalUsdt ?? null
+            legacyStaticCapUsdt: maxOrderNotionalUsdt ?? null,
+            v2HardSafetyCapUsdt: selectedSymbolV2CapUsdt
         });
         console.info(JSON.stringify({
             event: "LIVE_ORDER_SIZING_AUTHORITY_PROOF",
@@ -9573,15 +9580,23 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             existingAccountNotionalUsdt,
             existingSymbolNotionalUsdt,
             requestedOrderNotionalUsdt,
-            finalOrderNotionalUsdt,
-            risk_per_trade_pct: RISK_PER_TRADE_PCT,
-            equity_initial_cap_usdt: accountEquityUsdt != null ? accountEquityUsdt * MAX_INITIAL_NOTIONAL_EQUITY_MULTIPLE : null,
-            symbol_cap_usdt: accountEquityUsdt != null ? accountEquityUsdt * MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE : null,
-            account_cap_usdt: accountEquityUsdt != null ? accountEquityUsdt * MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE : null,
+            riskBasedNotionalUsdt: equityAdaptiveSizingAuthority?.riskBasedNotionalUsdt ?? null,
+            policyRequestedNotionalUsdt: v2PolicyRequestedNotionalUsdt ?? requestedOrderNotionalUsdt,
+            equityInitialCapUsdt: accountEquityUsdt != null ? accountEquityUsdt * MAX_INITIAL_NOTIONAL_EQUITY_MULTIPLE : null,
+            symbolCapUsdt: accountEquityUsdt != null ? (isEthForProof ? Math.min(accountEquityUsdt * MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE, 2000) : accountEquityUsdt * MAX_SYMBOL_NOTIONAL_EQUITY_MULTIPLE) : null,
+            accountCapUsdt: accountEquityUsdt != null ? accountEquityUsdt * MAX_ACCOUNT_NOTIONAL_EQUITY_MULTIPLE : null,
+            availableBalanceCapUsdt: equityAdaptiveSizingAuthority?.availableBalanceCapUsdt ?? null,
+            btcV2CapUsdt,
+            ethV2CapUsdt,
+            selectedSymbolV2CapUsdt,
             legacy_static_cap_usdt: liveCapProof.legacyStaticCapUsdt,
             emergency_cap_usdt: liveCapProof.emergencyCapUsdt,
             effective_live_cap_usdt: liveCapProof.effectiveLiveCapUsdt,
             ultimate_safety_cap_usdt: liveCapProof.effectiveLiveCapUsdt,
+            preLotNotionalUsdt: equityAdaptiveSizingAuthority?.preLotNotionalUsdt ?? null,
+            finalOrderNotionalUsdt,
+            limitingAuthority: equityAdaptiveSizingAuthority?.limitingAuthority ?? null,
+            finalSizingAuthority: equityAdaptiveSizingAuthority?.finalSizingAuthority ?? null,
             limiting_authority: equityAdaptiveSizingAuthority?.limitingAuthority ?? null,
             final_sizing_authority: equityAdaptiveSizingAuthority?.finalSizingAuthority ?? null,
             emergency_cap_applied: equityAdaptiveSizingAuthority?.emergencyCapApplied ?? false,

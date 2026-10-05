@@ -272,9 +272,9 @@ export function getEngineConfig(env: EnvInput = process.env): EngineConfig {
 
   const okxLiveV2MaxOrderNotionalUsdt = (() => {
     const raw = env.OKX_LIVE_V2_MAX_ORDER_NOTIONAL_USDT;
-    if (raw === undefined || raw.trim() === "") return 500;
+    if (raw === undefined || raw.trim() === "") return null;
     const n = Number(raw);
-    if (!Number.isFinite(n) || n <= 0) return 500;
+    if (!Number.isFinite(n) || n <= 0) return null;
     return Math.min(100_000, n);
   })();
 

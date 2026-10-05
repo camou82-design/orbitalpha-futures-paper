@@ -507,6 +507,7 @@ export interface EngineV2ConfigAdapter {
     okxLiveMaxAddonCount?: number | null;
     okxLiveEmergencyMaxOrderNotionalUsdt?: number | null;
     okxLiveV2MaxOrderNotionalUsdt?: number | null;
+    okxLiveV2EthMaxOrderNotionalUsdt?: number | null;
     okxLiveMarginReserveRatio?: number;
     paperTakerFeeRate?: number;
     externalMarketContextEnabled?: boolean;
@@ -643,6 +644,8 @@ export interface V2BridgeConfig {
     okxLiveMaxAccountNotionalUsdt?: number | null;
     okxLiveMaxAddonCount?: number | null;
     okxLiveEmergencyMaxOrderNotionalUsdt?: number | null;
+    okxLiveV2MaxOrderNotionalUsdt?: number | null;
+    okxLiveV2EthMaxOrderNotionalUsdt?: number | null;
     okxLiveMarginReserveRatio?: number;
     paperTakerFeeRate?: number;
     externalMarketContextEnabled?: boolean;

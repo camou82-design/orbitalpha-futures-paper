@@ -581,12 +581,181 @@ export async function writeManualTakeoverDocToDisk(
 }
 
 /**
+ * Result of evaluating bot provenance for an algorithmic order.
+ */
+export type BotAlgoProvenanceResult = Readonly<{
+  matched: boolean;
+  evidence: string;
+  matchedOpenPosition?: PaperOpenPositionRecord | null;
+}>;
+
+/**
+ * Checks whether an algo order (including exchange-created child TP/SL with empty clOrdId)
+ * has verifiable provenance originating from a bot open position.
+ * Uses strict hierarchical authority:
+ * Tier 1: Direct Registry / parent order ID match
+ * Tier 2: Strict AttachAlgoOrds child provenance (conjunctive: empty clOrdId, reduceOnly, side, exact size, exact price within 0.5%, strict timestamp within 60s, slot claiming)
+ */
+export function evaluateBotAlgoProvenance(
+  algo: Record<string, unknown>,
+  openPositions?: ReadonlyArray<PaperOpenPositionRecord> | null,
+  claimedAlgoIds?: Set<string>
+): BotAlgoProvenanceResult {
+  if (!openPositions || openPositions.length === 0) {
+    return { matched: false, evidence: "no_open_positions" };
+  }
+
+  const algoId = String(algo.algoId ?? algo.ordId ?? "").trim();
+  const algoClOrdId = String(algo.algoClOrdId ?? algo.clOrdId ?? "").trim();
+  const instId = String(algo.instId ?? "");
+
+  // If already claimed by another matching slot, preserve as operator/external to avoid false takeover masking
+  if (algoId.length > 0 && claimedAlgoIds && claimedAlgoIds.has(algoId)) {
+    return { matched: false, evidence: "algo_id_already_claimed" };
+  }
+
+  for (const open of openPositions) {
+    if (instId.length > 0 && !matchesSymbolInstId(instId, open.symbol)) {
+      continue;
+    }
+
+    // -------------------------------------------------------------------------
+    // Tier 1: Direct Registry Match (Highest Authority)
+    // -------------------------------------------------------------------------
+    if (algoId.length > 0) {
+      if (open.protectiveSlAlgoId && algoId === String(open.protectiveSlAlgoId).trim()) {
+        if (claimedAlgoIds) claimedAlgoIds.add(algoId);
+        return { matched: true, evidence: "bot_matched_protective_sl_algo_id", matchedOpenPosition: open };
+      }
+      if (open.protectiveTpAlgoId && algoId === String(open.protectiveTpAlgoId).trim()) {
+        if (claimedAlgoIds) claimedAlgoIds.add(algoId);
+        return { matched: true, evidence: "bot_matched_protective_tp_algo_id", matchedOpenPosition: open };
+      }
+      if (open.protectiveStopAlgoId && algoId === String(open.protectiveStopAlgoId).trim()) {
+        if (claimedAlgoIds) claimedAlgoIds.add(algoId);
+        return { matched: true, evidence: "bot_matched_protective_stop_algo_id", matchedOpenPosition: open };
+      }
+      if (open.breakevenStopAlgoId && algoId === String(open.breakevenStopAlgoId).trim()) {
+        if (claimedAlgoIds) claimedAlgoIds.add(algoId);
+        return { matched: true, evidence: "bot_matched_breakeven_stop_algo_id", matchedOpenPosition: open };
+      }
+      if (open.exchangeOrdId && String(algo.parentOrdId ?? "").trim() === String(open.exchangeOrdId).trim()) {
+        if (claimedAlgoIds) claimedAlgoIds.add(algoId);
+        return { matched: true, evidence: "bot_matched_parent_ord_id", matchedOpenPosition: open };
+      }
+    }
+
+    // -------------------------------------------------------------------------
+    // Tier 2: Strict Exchange-Created Attach Child Provenance (Empty ClOrdId Only)
+    // -------------------------------------------------------------------------
+    // If algo has an explicit clOrdId, it MUST be evaluated by schema matching, NOT here.
+    if (algoClOrdId.length > 0) {
+      continue;
+    }
+
+    const isReduceOnly = algo.reduceOnly === true || algo.reduceOnly === "true";
+    if (!isReduceOnly) {
+      continue; // Non-reduce-only child can NEVER be a bot protective order!
+    }
+
+    // Only positions that actually planned/submitted entry attachAlgoOrds can spawn child orders
+    const openAny = open as Record<string, unknown>;
+    const attachPlanned =
+      openAny.entryFullPositionTpAttached === true ||
+      openAny.entryRangeTp2BackstopAttached === true ||
+      open.protectionPlanned === true ||
+      open.isProtectiveStopRegistered === true ||
+      open.protectionSubmitAttempted === true;
+
+    if (!attachPlanned) {
+      continue; // No bot attach planned -> external manual order!
+    }
+
+    const algoSide = String(algo.side ?? "").toLowerCase();
+    const algoPosSide = String(algo.posSide ?? "").toLowerCase();
+    const posSide = String(open.side).toLowerCase();
+
+    // Long position closes via sell; Short position closes via buy
+    const sideMatches = (posSide === "long" && algoSide === "sell") ||
+                        (posSide === "short" && algoSide === "buy");
+    const posSideMatches = algoPosSide === "" || algoPosSide === "net" || algoPosSide === posSide;
+    if (!sideMatches || !posSideMatches) {
+      continue;
+    }
+
+    // Size must strictly match open contracts
+    const algoSz = Number(algo.sz ?? algo.size ?? 0);
+    const openContracts = Number(openAny.contracts ?? open.okxContracts ?? open.exchangeFilledSize ?? 0);
+    const szMatches = openContracts > 0 && algoSz > 0 &&
+      (Math.abs(algoSz - openContracts) < 0.0001 || algoSz <= openContracts + 0.0001);
+    if (!szMatches) {
+      continue;
+    }
+
+    // Price correlation: TP or SL must strictly match bot targets within 0.5%
+    const triggerPx = Number(algo.tpTriggerPx ?? algo.triggerPx ?? algo.slTriggerPx ?? 0);
+    const targetTp = (openAny.takeProfitPrice as number | undefined) ?? open.takeProfit1Px ?? open.takeProfit2Px;
+    const targetSl = open.stopPrice ?? (openAny.stopLoss as number | undefined) ?? (openAny.protectiveSlPrice as number | undefined);
+
+    const tpMatches = targetTp != null && triggerPx > 0 && Math.abs(triggerPx - targetTp) / targetTp < 0.005;
+    const slMatches = targetSl != null && triggerPx > 0 && Math.abs(triggerPx - targetSl) / targetSl < 0.005;
+    if (!tpMatches && !slMatches) {
+      continue; // Price does not match bot TP or SL target -> reject provenance!
+    }
+
+    // Strict Timestamp Correlation:
+    // Exchange attach child orders are created simultaneously with entry fill (within 60s).
+    // An order created minutes later or without cTime cannot be assumed to be bot-created!
+    const cTime = Number(algo.cTime ?? algo.uTime ?? 0);
+    const timeCorrelated = cTime > 0 && open.openedAt && open.openedAt > 0
+      ? Math.abs(cTime - open.openedAt) <= 60_000
+      : false;
+
+    if (!timeCorrelated) {
+      continue; // Timestamps do not correlate -> reject provenance!
+    }
+
+    // Slot check: Ensure only 1 attach child order per leg (TP or SL) can be claimed per open position!
+    const legKey = `${open.symbol}:${open.side}:${tpMatches ? "tp" : "sl"}`;
+    if (claimedAlgoIds && claimedAlgoIds.has(legKey)) {
+      continue; // This position leg slot is already occupied by a bot child order! Reject duplicate as operator-owned.
+    }
+
+    // Provenance confirmed! Register in claimed set if provided to prevent duplicate matching
+    if (claimedAlgoIds) {
+      if (algoId.length > 0) claimedAlgoIds.add(algoId);
+      claimedAlgoIds.add(legKey);
+    }
+
+    return {
+      matched: true,
+      evidence: tpMatches ? "bot_matched_attached_tp_provenance" : "bot_matched_attached_sl_provenance",
+      matchedOpenPosition: open
+    };
+  }
+
+  return { matched: false, evidence: "no_bot_provenance" };
+}
+
+/**
+ * Boolean wrapper for evaluateBotAlgoProvenance.
+ */
+export function hasBotAlgoProvenance(
+  algo: Record<string, unknown>,
+  openPositions?: ReadonlyArray<PaperOpenPositionRecord> | null,
+  claimedAlgoIds?: Set<string>
+): boolean {
+  return evaluateBotAlgoProvenance(algo, openPositions, claimedAlgoIds).matched;
+}
+
+/**
  * Authoritative predicate to determine whether an OKX algo order is owned by the bot engine.
  * Never cancels an operator/manual order based on casual prefix alone.
  */
 export function isAuthoritativeBotOwnedAlgoOrder(
   algo: Record<string, unknown>,
-  openPositions?: ReadonlyArray<PaperOpenPositionRecord> | null
+  openPositions?: ReadonlyArray<PaperOpenPositionRecord> | null,
+  claimedAlgoIds?: Set<string>
 ): boolean {
   const algoId = String(algo.algoId ?? algo.ordId ?? "").trim();
   const algoClOrdId = String(algo.algoClOrdId ?? algo.clOrdId ?? "").trim();
@@ -620,6 +789,12 @@ export function isAuthoritativeBotOwnedAlgoOrder(
         }
       }
     }
+
+    // Bot provenance for exchange-created child algo orders (e.g. empty algoClOrdId from attachAlgoOrds)
+    if (hasBotAlgoProvenance(algo, openPositions, claimedAlgoIds)) {
+      return true;
+    }
+
     // When positions exist, never grant cancel authority on casual prefix match alone
     return false;
   }
@@ -678,19 +853,27 @@ export type OrderOwnershipResult = Readonly<{
 export function evaluateOrderOwnership(
   order: Record<string, unknown>,
   isAlgo: boolean,
-  openPositions?: ReadonlyArray<PaperOpenPositionRecord> | null
+  openPositions?: ReadonlyArray<PaperOpenPositionRecord> | null,
+  claimedAlgoIds?: Set<string>
 ): OrderOwnershipResult {
   const ordId = String(order.ordId ?? order.algoId ?? "").trim();
   const clOrdId = String(order.clOrdId ?? order.algoClOrdId ?? "").trim();
 
+  const provenanceRes = isAlgo
+    ? evaluateBotAlgoProvenance(order, openPositions, claimedAlgoIds)
+    : { matched: false, evidence: "not_algo" };
+
   const isBotOwned = isAlgo
-    ? isAuthoritativeBotOwnedAlgoOrder(order, openPositions)
+    ? (provenanceRes.matched || isAuthoritativeBotOwnedAlgoOrder(order, openPositions, claimedAlgoIds))
     : isAuthoritativeBotOwnedPendingOrder(order, openPositions);
 
   if (isBotOwned) {
+    const isAttachedProvenance = isAlgo && !clOrdId && provenanceRes.matched;
     return {
       ownership: "ENGINE_OWNED",
-      ownershipEvidence: `bot_matched_${isAlgo ? "algo" : "pending"}_id`,
+      ownershipEvidence: isAttachedProvenance
+        ? provenanceRes.evidence
+        : `bot_matched_${isAlgo ? "algo" : "pending"}_id`,
       mutationAllowed: true,
       cancelAllowed: true,
       authorityOwner: "ENGINE",
@@ -784,6 +967,7 @@ export function evaluateSymbolPendingOrderAuthority(input: Readonly<{
   const proofs: Record<string, unknown>[] = [];
   let operatorOrderCount = 0;
   let engineOrderCount = 0;
+  const claimedAlgoIds = new Set<string>();
 
   for (const ord of symPending) {
     const ev = evaluateOrderOwnership(ord, false, opens);
@@ -807,7 +991,7 @@ export function evaluateSymbolPendingOrderAuthority(input: Readonly<{
   }
 
   for (const algo of symAlgos) {
-    const ev = evaluateOrderOwnership(algo, true, opens);
+    const ev = evaluateOrderOwnership(algo, true, opens, claimedAlgoIds);
     if (ev.authorityOwner === "OPERATOR") operatorOrderCount++;
     else engineOrderCount++;
     const proof = buildManualPendingOrderAuthorityProof({

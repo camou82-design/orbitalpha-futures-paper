@@ -262,7 +262,7 @@ export function resolveUltimateSafetyCapForOrderSizing(input: Readonly<{
 }>): LiveOrderNotionalCapResolution & { v2HardSafetyCapUsdt: number | null } {
     const emergencyCapUsdt = positiveCapUsdt(input.emergencyCapUsdt);
     const legacyStaticCapUsdt = positiveCapUsdt(input.legacyStaticCapUsdt);
-    const v2HardSafetyCapUsdt = positiveCapUsdt(input.v2HardSafetyCapUsdt) ?? (input.v2AuthorityEntry === true ? DEFAULT_V2_HARD_SAFETY_CAP_USDT : null);
+    const v2HardSafetyCapUsdt = positiveCapUsdt(input.v2HardSafetyCapUsdt);
     const activeEmergencyCap = input.emergencyFailsafeActive === true ? emergencyCapUsdt : null;
 
     let effectiveLiveCapUsdt: number | null = null;

@@ -13483,12 +13483,15 @@ export class PaperEngine {
       available_balance_usdt: this.okxAvailableBalanceUsdt,
       ...this.okxAuthProofContext()
     };
+    const v2HardSafetyCapUsdt = resolveV2HardSafetyCapForSymbol(String(input.symbol), this.config);
     const liveCapResolution =
       input.authoritySource === "v2"
         ? resolveUltimateSafetyCapForOrderSizing({
             v2AuthorityEntry: true,
+            emergencyFailsafeActive: input.emergencyFailsafeActive === true,
             emergencyCapUsdt: this.config.okxLiveEmergencyMaxOrderNotionalUsdt,
-            legacyStaticCapUsdt: this.config.okxLiveMaxOrderNotionalUsdt
+            legacyStaticCapUsdt: this.config.okxLiveMaxOrderNotionalUsdt,
+            v2HardSafetyCapUsdt
           })
         : resolveEffectiveLiveOrderNotionalCap({
             emergencyCapUsdt: this.config.okxLiveEmergencyMaxOrderNotionalUsdt,
@@ -13848,7 +13851,7 @@ export class PaperEngine {
         authoritySource: input.authoritySource,
         okxLiveStaticNotionalCapEnabled: this.config.okxLiveStaticNotionalCapEnabled,
         staticSafetyCapUsdt: liveCapResolution.effectiveLiveCapUsdt,
-        v2HardSafetyCapUsdt: this.config.okxLiveV2MaxOrderNotionalUsdt ?? 600,
+        v2HardSafetyCapUsdt,
         intendedNotionalUsdt: final_submitted_notional_usdt,
         emergencyUltimateCapUsdt: liveCapResolution.emergencyCapUsdt,
         emergencyFailsafeActive: input.emergencyFailsafeActive === true,
@@ -13878,6 +13881,7 @@ export class PaperEngine {
         legacy_static_cap_usdt: liveCapResolution.legacyStaticCapUsdt,
         emergency_cap_usdt: liveCapResolution.emergencyCapUsdt,
         effective_live_cap_usdt: liveCapResolution.effectiveLiveCapUsdt,
+        v2_hard_safety_cap_usdt: v2HardSafetyCapUsdt,
         static_safety_cap,
         static_cap_enabled: this.config.okxLiveStaticNotionalCapEnabled,
         static_cap_skipped_for_v2_authority: skipStaticCapForV2Authority,
@@ -26797,6 +26801,8 @@ export function buildV2ConfigBridge(config: EngineConfig): V2BridgeConfig {
     okxLiveMaxAccountNotionalUsdt: config.okxLiveMaxAccountNotionalUsdt ?? null,
     okxLiveMaxAddonCount: config.okxLiveMaxAddonCount ?? null,
     okxLiveEmergencyMaxOrderNotionalUsdt: config.okxLiveEmergencyMaxOrderNotionalUsdt ?? null,
+    okxLiveV2MaxOrderNotionalUsdt: config.okxLiveV2MaxOrderNotionalUsdt ?? null,
+    okxLiveV2EthMaxOrderNotionalUsdt: config.okxLiveV2EthMaxOrderNotionalUsdt ?? null,
     okxLiveMarginReserveRatio: config.okxLiveMarginReserveRatio ?? 0.2,
     paperTakerFeeRate: config.paperTakerFeeRate,
     externalMarketContextEnabled: config.externalMarketContextEnabled ?? false,
@@ -27031,6 +27037,18 @@ function buildPositionIdentityMeta(pos: PaperOpenPositionRecord | PaperClosedPos
   };
 }
 
+export function resolveV2HardSafetyCapForSymbol(
+  symbol: string,
+  config: { okxLiveV2MaxOrderNotionalUsdt?: number | null; okxLiveV2EthMaxOrderNotionalUsdt?: number | null }
+): number | null {
+  const cleanSym = String(symbol).toUpperCase().replace(/[-_]/g, "").replace("SWAP", "");
+  const isEth = cleanSym === "ETHUSDT";
+  if (isEth) {
+    return config.okxLiveV2EthMaxOrderNotionalUsdt ?? 1200;
+  }
+  return config.okxLiveV2MaxOrderNotionalUsdt ?? null;
+}
+
 export function resolveLiveSubmitStaticSafetyCap(input: Readonly<{
   authoritySource?: string | null;
   okxLiveStaticNotionalCapEnabled: boolean;
@@ -27058,19 +27076,18 @@ export function resolveLiveSubmitStaticSafetyCap(input: Readonly<{
   let emergencyCapReason: string | null = null;
 
   if (isV2) {
-    const rawHard =
-      input.v2HardSafetyCapUsdt != null && input.v2HardSafetyCapUsdt > 0
-        ? input.v2HardSafetyCapUsdt
-        : 600;
-    const hardCapResolution = resolveV2HardSafetyCapForAuthority({
-      v2HardSafetyCapRawUsdt: rawHard,
-      isHighwayLineage: input.isHighwayLineage === true,
-      appliedLeverage: input.appliedLeverage ?? 10
-    });
-    const v2HardCap = hardCapResolution.effectiveSafetyCapNotionalUsdt ?? rawHard;
-    if (v2HardCap > 0 && finalSubmittedNotionalUsdt > v2HardCap) {
-      finalSubmittedNotionalUsdt = v2HardCap;
-      finalSizeSource = "v2_hard_safety_cap";
+    if (input.v2HardSafetyCapUsdt != null && input.v2HardSafetyCapUsdt > 0) {
+      const rawHard = input.v2HardSafetyCapUsdt;
+      const hardCapResolution = resolveV2HardSafetyCapForAuthority({
+        v2HardSafetyCapRawUsdt: rawHard,
+        isHighwayLineage: input.isHighwayLineage === true,
+        appliedLeverage: input.appliedLeverage ?? 10
+      });
+      const v2HardCap = hardCapResolution.effectiveSafetyCapNotionalUsdt ?? rawHard;
+      if (v2HardCap > 0 && finalSubmittedNotionalUsdt > v2HardCap) {
+        finalSubmittedNotionalUsdt = v2HardCap;
+        finalSizeSource = "v2_hard_safety_cap";
+      }
     }
   } else {
     if (

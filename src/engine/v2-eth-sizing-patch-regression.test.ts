@@ -278,9 +278,9 @@ describe("ETHUSDT Sizing Patch Regression Suite", () => {
             assert.equal(Math.round(res.finalOrderNotionalUsdt), 500); // Bounded by BTC default 500 hard safety cap
         });
 
-        it("CASE 6B: Config Loader parses OKX_LIVE_V2_ETH_MAX_ORDER_NOTIONAL_USDT (default 1200, custom override, preserves BTC 500)", () => {
+        it("CASE 6B: Config Loader parses OKX_LIVE_V2_ETH_MAX_ORDER_NOTIONAL_USDT (default 1200, custom override, preserves BTC null default)", () => {
             const defaultConfig = getEngineConfig({});
-            assert.equal(defaultConfig.okxLiveV2MaxOrderNotionalUsdt, 500);
+            assert.equal(defaultConfig.okxLiveV2MaxOrderNotionalUsdt, null);
             assert.equal(defaultConfig.okxLiveV2EthMaxOrderNotionalUsdt, 1200);
 
             const customConfig = getEngineConfig({
