@@ -256,7 +256,7 @@ describe("ETHUSDT Sizing Patch Regression Suite", () => {
             assert.ok(1700 + res.finalOrderNotionalUsdt <= 2000);
         });
 
-        it("CASE 6: BTC same fixture → 100% untouched by ETH rules (v2HardSafetyCap remains 500 default)", () => {
+        it("CASE 6A: BTC default config → untouched by ETH rules (v2HardSafetyCap is null, allows full adaptive sizing)", () => {
             const stopPrice = 65000 * (1 - 0.015);
             const res = evaluateEquityAdaptiveSizing({
                 symbol: "BTCUSDT",
@@ -270,15 +270,39 @@ describe("ETHUSDT Sizing Patch Regression Suite", () => {
                 entryQualityGrade: "A",
                 existingSymbolNotionalUsdt: 0,
                 existingAccountNotionalUsdt: 0,
-                v2HardSafetyCapUsdt: 500, // BTC retains 500
+                v2HardSafetyCapUsdt: null, // BTC default is null
+                roundTripFeeRate: 0,
                 lastPrice: 65000,
                 v2AuthorityEntry: true
             });
             assert.equal(res.sizingPassed, true);
-            assert.equal(Math.round(res.finalOrderNotionalUsdt), 500); // Bounded by BTC default 500 hard safety cap
+            assert.equal(res.limitingAuthority, "risk_based_notional");
+            assert.equal(Math.round(res.finalOrderNotionalUsdt), 2300); // Full adaptive sizing without static cap bottleneck
         });
 
-        it("CASE 6B: Config Loader parses OKX_LIVE_V2_ETH_MAX_ORDER_NOTIONAL_USDT (default 1200, custom override, preserves BTC null default)", () => {
+        it("CASE 6B: BTC explicit custom cap override → respects custom v2HardSafetyCap (e.g. 500 USDT)", () => {
+            const stopPrice = 65000 * (1 - 0.015);
+            const res = evaluateEquityAdaptiveSizing({
+                symbol: "BTCUSDT",
+                side: "long",
+                orderKind: "ENTRY",
+                accountEquityUsdt: baseEquity,
+                availableBalanceUsdt: baseBalance,
+                entryReferencePrice: 65000,
+                effectiveStopPrice: stopPrice,
+                appliedLeverage: 10,
+                entryQualityGrade: "A",
+                existingSymbolNotionalUsdt: 0,
+                existingAccountNotionalUsdt: 0,
+                v2HardSafetyCapUsdt: 500, // Explicit custom cap override
+                lastPrice: 65000,
+                v2AuthorityEntry: true
+            });
+            assert.equal(res.sizingPassed, true);
+            assert.equal(Math.round(res.finalOrderNotionalUsdt), 500); // Clamped to explicit custom cap
+        });
+
+        it("CASE 6C: Config Loader parses OKX_LIVE_V2_ETH_MAX_ORDER_NOTIONAL_USDT (default 1200, custom override, preserves BTC null default)", () => {
             const defaultConfig = getEngineConfig({});
             assert.equal(defaultConfig.okxLiveV2MaxOrderNotionalUsdt, null);
             assert.equal(defaultConfig.okxLiveV2EthMaxOrderNotionalUsdt, 1200);

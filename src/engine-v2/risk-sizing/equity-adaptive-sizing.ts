@@ -151,7 +151,7 @@ export type EquityAdaptiveSizingResult = Readonly<{
     emergencyCapUsdt: number | null;
     /** Raw OKX_LIVE_MAX_ORDER_NOTIONAL_USDT when set. */
     legacyStaticCapUsdt: number | null;
-    /** V2 hard safety cap (default 500 USDT). */
+    /** V2 hard safety cap when explicitly configured (null by default for full adaptive sizing). */
     v2HardCapUsdt: number | null;
     /** min(emergency, legacy) binding cap for non-V2 live paths; null for normal V2 authority. */
     effectiveLiveCapUsdt: number | null;
@@ -249,7 +249,7 @@ export function resolveEffectiveLiveOrderNotionalCap(input: Readonly<{
 }
 
 /**
- * V2 entries use OKX_LIVE_V2_MAX_ORDER_NOTIONAL_USDT (v2HardSafetyCapUsdt, default 500) as hard ceiling.
+ * V2 entries use OKX_LIVE_V2_MAX_ORDER_NOTIONAL_USDT (v2HardSafetyCapUsdt; null by default for adaptive sizing, explicit cap only when configured).
  * Legacy entries enforce OKX_LIVE_MAX_ORDER_NOTIONAL_USDT (legacyStaticCapUsdt) as hard ceiling.
  * Emergency cap binds when emergencyFailsafeActive is explicitly true (and takes priority if smaller).
  */

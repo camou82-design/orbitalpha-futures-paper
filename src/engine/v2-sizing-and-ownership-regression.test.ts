@@ -50,7 +50,7 @@ async function runAllTests(): Promise<void> {
     const stopPrice = 2690.99;
     const appliedLeverage = 10;
     const config = {
-      okxLiveV2MaxOrderNotionalUsdt: 500,
+      okxLiveV2MaxOrderNotionalUsdt: null,
       okxLiveV2EthMaxOrderNotionalUsdt: 1200
     };
     const ethCap = resolveV2HardSafetyCapForSymbol("ETHUSDT", config);
@@ -266,19 +266,36 @@ async function runAllTests(): Promise<void> {
     console.log("  [PASS] CASE F: emergency failsafe correctly overrides sizing when active.");
   }
 
-  // --- CASE G: FULL_ENTRY without reducer => no arbitrary 500 USDT reduction on ETH ---
+  // --- CASE G1: Default bridge policy => BTC cap is null, ETH cap is 1200 ---
   {
-    const equity = 2440.16;
-    const config = {
+    const defaultConfig = {
+      okxLiveV2MaxOrderNotionalUsdt: null,
+      okxLiveV2EthMaxOrderNotionalUsdt: 1200
+    };
+    const bridgeDefault = buildV2ConfigBridge(defaultConfig as unknown as EngineConfig);
+    assertEq(bridgeDefault.okxLiveV2EthMaxOrderNotionalUsdt, 1200, "CASE G1: default bridge has ETH cap 1200");
+    assertEq(bridgeDefault.okxLiveV2MaxOrderNotionalUsdt, null, "CASE G1: default bridge has BTC cap null");
+
+    const btcCapDefault = resolveV2HardSafetyCapForSymbol("BTCUSDT", bridgeDefault);
+    assertEq(btcCapDefault, null, "CASE G1: BTC cap resolves to null (adaptive)");
+
+    const ethCapDefault = resolveV2HardSafetyCapForSymbol("ETHUSDT", bridgeDefault);
+    assertEq(ethCapDefault, 1200, "CASE G1: ETH cap resolves to 1200");
+    console.log("  [PASS] CASE G1: Default bridge policy correctly sets BTC cap to null and ETH cap to 1200.");
+  }
+
+  // --- CASE G2: Explicit custom cap override fixture => bridge carries custom BTC cap (e.g. 500) ---
+  {
+    const customConfig = {
       okxLiveV2MaxOrderNotionalUsdt: 500,
       okxLiveV2EthMaxOrderNotionalUsdt: 1200
     };
-    const bridge = buildV2ConfigBridge(config as unknown as EngineConfig);
-    assertEq(bridge.okxLiveV2EthMaxOrderNotionalUsdt, 1200, "CASE G: bridge has ETH cap 1200");
-    assertEq(bridge.okxLiveV2MaxOrderNotionalUsdt, 500, "CASE G: bridge has BTC cap 500");
+    const bridgeCustom = buildV2ConfigBridge(customConfig as unknown as EngineConfig);
+    assertEq(bridgeCustom.okxLiveV2EthMaxOrderNotionalUsdt, 1200, "CASE G2: custom bridge has ETH cap 1200");
+    assertEq(bridgeCustom.okxLiveV2MaxOrderNotionalUsdt, 500, "CASE G2: custom bridge has BTC cap 500");
 
-    const ethCap = resolveV2HardSafetyCapForSymbol("ETHUSDT", bridge);
-    assertEq(ethCap, 1200, "CASE G: ethCap is 1200 from bridge");
+    const ethCap = resolveV2HardSafetyCapForSymbol("ETHUSDT", bridgeCustom);
+    assertEq(ethCap, 1200, "CASE G2: ethCap is 1200 from bridge");
 
     const submitNormal = resolveLiveSubmitStaticSafetyCap({
       authoritySource: "v2",
@@ -291,9 +308,9 @@ async function runAllTests(): Promise<void> {
       isHighwayLineage: false,
       appliedLeverage: 10
     });
-    assertEq(submitNormal.finalSubmittedNotionalUsdt, 1200, "CASE G: normal ETH notional remains 1200");
-    assertFalse(submitNormal.emergencyCapApplied, "CASE G: emergency cap not applied in normal state");
-    console.log("  [PASS] CASE G: FULL_ENTRY without reducer preserves 1200 USDT ETH target.");
+    assertEq(submitNormal.finalSubmittedNotionalUsdt, 1200, "CASE G2: normal ETH notional remains 1200");
+    assertFalse(submitNormal.emergencyCapApplied, "CASE G2: emergency cap not applied in normal state");
+    console.log("  [PASS] CASE G2: Explicit custom cap override correctly binds when configured.");
   }
 
   // --- CASE H: Lot normalization accurate calculation ---
