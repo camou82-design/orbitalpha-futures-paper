@@ -234,6 +234,10 @@ export interface LegacySnapshotAdapter {
     canonicalRangeConfidence?: number;
     canonicalTrendWeaknessScore?: number;
     canonicalRegimeAmbiguous?: boolean;
+    macroPolarity?: string | null;
+    fastTrendShift?: any;
+    htf1hBias?: string | null;
+    htf4hBias?: string | null;
     /** OKX instrument tickSz propagated from instrument cache at engine boundary. */
     tickSz?: number;
 }
@@ -492,6 +496,10 @@ export interface EngineV2SnapshotAdapter {
     canonicalRangeConfidence?: number;
     canonicalTrendWeaknessScore?: number;
     canonicalRegimeAmbiguous?: boolean;
+    macroPolarity?: string | null;
+    fastTrendShift?: any;
+    htf1hBias?: string | null;
+    htf4hBias?: string | null;
     /** OKX instrument tickSz propagated from instrument cache at engine boundary. */
     tickSz?: number;
 }
@@ -530,6 +538,8 @@ export interface V2CommittedRiskPlan {
     appliedLeverage: number;
     stopPrice: number;
     invalidationPx: number;
+    plannedTp1Price?: number;
+    takeProfitPrice?: number;
     ts: number;
     authorityCreatedAt?: number;
 }

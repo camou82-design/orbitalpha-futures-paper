@@ -109,7 +109,7 @@ export function computeStructuralSetupIdentity(input: {
 }
 
 export function countCompletedCandlesSince(
-    candles: ReadonlyArray<{ ts?: number }> | null | undefined,
+    candles: ReadonlyArray<{ ts?: number; timestamp?: number }> | null | undefined,
     sinceTs: number,
     nowMs: number,
     intervalMs = 60_000
@@ -117,7 +117,7 @@ export function countCompletedCandlesSince(
     if (!candles || candles.length === 0) return 0;
     let count = 0;
     for (const c of candles) {
-        const cTs = Number(c?.ts ?? 0);
+        const cTs = Number(c?.ts ?? (c as any)?.timestamp ?? 0);
         if (!Number.isFinite(cTs) || cTs <= sinceTs) continue;
         if (cTs + intervalMs > nowMs) continue;
         count += 1;
@@ -546,4 +546,153 @@ export function evaluateSameSideLossReentryGate(
     };
     emitSameSideLossReentryProof(input, blockResult, { currentSetupIdentity, structuralEvent, strongTrendRevalidated: false });
     return blockResult;
+}
+
+export interface OppositeSideLossReentryGateInput extends SameSideLossReentryGateInput {}
+
+export interface OppositeSideLossReentryGateResult {
+    allowed: boolean;
+    reason: string;
+    evidence: string;
+    elapsedMs?: number;
+    requiredCooldownMs?: number;
+    completedCandlesSinceLoss?: number;
+}
+
+export function emitOppositeSideLossReentryProof(
+    input: OppositeSideLossReentryGateInput,
+    result: OppositeSideLossReentryGateResult,
+    extra: Record<string, unknown> = {}
+): void {
+    console.info(JSON.stringify({
+        event: "V2_OPPOSITE_SIDE_LOSS_REENTRY_PROOF",
+        symbol: input.symbol,
+        requestedSide: input.requestedSide,
+        action: result.allowed ? "ALLOW" : "BLOCK",
+        reason: result.reason,
+        evidence: result.evidence,
+        lastLossExitAt: input.lastLossState?.lastLossExitAt ?? null,
+        lastLossExitSide: input.lastLossState?.lastLossExitSide ?? null,
+        lastLossExitPrice: input.lastLossState?.lastLossExitPrice ?? null,
+        currentPrice: input.currentPrice,
+        elapsedMs: result.elapsedMs ?? null,
+        requiredCooldownMs: result.requiredCooldownMs ?? 300_000,
+        completedCandlesSinceLoss: result.completedCandlesSinceLoss ?? null,
+        reversalConfirmed: input.reversalConfirmed ?? false,
+        structuralEvent: input.structuralEvent ?? null,
+        ...extra
+    }));
+}
+
+/**
+ * Evaluates whether a new opposite-side entry after a loss / stop-loss termination should be:
+ * - BLOCKED due to premature reversal churn / whipsaw noise (minimum 300s + at least one 5m completed candle)
+ * - BLOCKED due to lack of structural reversal confirmation (reversalConfirmed / breakout / retest)
+ * - ALLOWED when minimum time elapsed, 5m structural confirmation established, and structural reversal confirmed.
+ */
+export function evaluateOppositeSideLossReentryGate(
+    input: OppositeSideLossReentryGateInput
+): OppositeSideLossReentryGateResult {
+    const { symbol, requestedSide, currentPrice, now, lastLossState, candles } = input;
+
+    // 1. 이전 손절 이력 없으면 즉시 허용
+    if (!lastLossState) {
+        const result: OppositeSideLossReentryGateResult = {
+            allowed: true,
+            reason: "NO_PRIOR_LOSS_ACTIVE",
+            evidence: "no_prior_loss_for_symbol"
+        };
+        emitOppositeSideLossReentryProof(input, result);
+        return result;
+    }
+
+    // 2. 동일 방향 요청인 경우 opposite 게이트 대상 아님 (pass-through)
+    if (requestedSide === lastLossState.lastLossExitSide) {
+        const result: OppositeSideLossReentryGateResult = {
+            allowed: true,
+            reason: "SAME_SIDE_NOT_APPLICABLE_TO_OPPOSITE_GATE",
+            evidence: `same_side|lossSide=${lastLossState.lastLossExitSide}|reqSide=${requestedSide}`
+        };
+        return result;
+    }
+
+    // 3. 반대방향 진입 시도 평가
+    const lossExitAt = lastLossState.lastLossExitAt;
+    const elapsedMs = Math.max(0, now - lossExitAt);
+    const requiredCooldownMs = 300_000; // 최소 300초 (5분)
+
+    // Gate A: 최소 시간 확인 (300초 미만은 무조건 휩쏘 방지로 차단)
+    if (elapsedMs < requiredCooldownMs) {
+        const result: OppositeSideLossReentryGateResult = {
+            allowed: false,
+            reason: "OPPOSITE_SIDE_LOSS_COOLDOWN_ACTIVE",
+            evidence: `opposite_side_cooldown_active|elapsedSec=${Math.floor(elapsedMs / 1000)}s<300s|lossSide=${lastLossState.lastLossExitSide}|reqSide=${requestedSide}`,
+            elapsedMs,
+            requiredCooldownMs
+        };
+        emitOppositeSideLossReentryProof(input, result);
+        return result;
+    }
+
+    // Gate B: 손절 이후 완성된 봉 카운트 (최소 5분봉 1개 상당 = 1분봉 5개 이상)
+    const lossTs = lastLossState.lastLossExitCandleTs ?? lastLossState.lastLossExitAt;
+    const completedCandlesSinceLoss = countCompletedCandlesSince(candles ?? null, lossTs, now);
+    // 만약 캔들이 제공되었으나 완성된 캔들이 5개 미만(5분 미만 봉)인 경우 차단
+    if (candles && candles.length > 0 && completedCandlesSinceLoss < 5) {
+        const result: OppositeSideLossReentryGateResult = {
+            allowed: false,
+            reason: "OPPOSITE_SIDE_INSUFFICIENT_COMPLETED_CANDLES",
+            evidence: `insufficient_candles|completed=${completedCandlesSinceLoss}<5|lossSide=${lastLossState.lastLossExitSide}|reqSide=${requestedSide}`,
+            elapsedMs,
+            requiredCooldownMs,
+            completedCandlesSinceLoss
+        };
+        emitOppositeSideLossReentryProof(input, result);
+        return result;
+    }
+
+    // Gate C: 반대방향 구조 확인 (reversalConfirmed, breakout/retest, reclaim/rejection 등)
+    const structuralEvent = input.structuralEvent ?? inferStructuralSetupEvent({
+        subtype: input.subtype,
+        reversalConfirmed: input.reversalConfirmed
+    });
+    const reversalConfirmed = input.reversalConfirmed === true;
+    const subtypeUpper = String(input.subtype ?? "").toUpperCase();
+    const hasStructuralReversal =
+        reversalConfirmed ||
+        structuralEvent === "confirmed_reversal" ||
+        structuralEvent === "confirmed_breakout" ||
+        structuralEvent === "confirmed_breakdown" ||
+        structuralEvent === "confirmed_retest" ||
+        subtypeUpper.includes("REVERSAL") ||
+        subtypeUpper.includes("BREAKOUT") ||
+        subtypeUpper.includes("BREAKDOWN") ||
+        subtypeUpper.includes("RETEST") ||
+        subtypeUpper.includes("RECLAIM") ||
+        subtypeUpper.includes("REJECTION");
+
+    if (!hasStructuralReversal) {
+        const result: OppositeSideLossReentryGateResult = {
+            allowed: false,
+            reason: "OPPOSITE_SIDE_STRUCTURAL_CONFIRMATION_REQUIRED",
+            evidence: `no_structural_reversal_confirmation|reversalConfirmed=false|structuralEvent=${structuralEvent}|subtype=${input.subtype}`,
+            elapsedMs,
+            requiredCooldownMs,
+            completedCandlesSinceLoss
+        };
+        emitOppositeSideLossReentryProof(input, result);
+        return result;
+    }
+
+    // 모든 조건 통과 -> 반대방향 구조적 반전 진입 허용!
+    const allowResult: OppositeSideLossReentryGateResult = {
+        allowed: true,
+        reason: "OPPOSITE_SIDE_STRUCTURAL_REVERSAL_ALLOWED",
+        evidence: `opposite_reversal_confirmed|elapsedSec=${Math.floor(elapsedMs / 1000)}s|candles=${completedCandlesSinceLoss}|structuralEvent=${structuralEvent}`,
+        elapsedMs,
+        requiredCooldownMs,
+        completedCandlesSinceLoss
+    };
+    emitOppositeSideLossReentryProof(input, allowResult);
+    return allowResult;
 }

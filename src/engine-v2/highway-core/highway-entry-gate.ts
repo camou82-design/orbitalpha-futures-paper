@@ -278,13 +278,21 @@ export function evaluateHighwayCoreEntryGate(input: HighwayEntryGateInput): High
             }
         } else if (regime === "TREND" || subtype === "FAST_TREND_SHIFT" || isNonRangeLineage) {
             const meta = (execution?.metadata ?? {}) as Record<string, unknown>;
+            const isFtsLineage =
+                meta.fast_trend_shift === true ||
+                subtype === "FAST_TREND_SHIFT" ||
+                meta.reason === "fast_trend_shift" ||
+                String(execution?.reason ?? "").toLowerCase().includes("fast_trend_shift") ||
+                String(execution?.reason ?? "").toLowerCase().includes("fts");
+            const earlyProbeOk = meta.early_probe === true && !isFtsLineage;
+
             const structureOk =
                 meta.retestConfirmed === true ||
                 meta.reclaimConfirmed === true ||
                 meta.pullbackConfirmed === true ||
                 meta.continuationPhase === "RETEST_TOUCHED" ||
-                meta.fast_trend_shift === true ||
-                meta.early_probe === true;
+                meta.fts_expedited === true ||
+                earlyProbeOk;
 
             const highwayAuth =
                 highwayAuthForProof ??

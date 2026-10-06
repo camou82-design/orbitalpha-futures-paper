@@ -14,7 +14,7 @@ import {
 import { deriveTrendSideCandidate, resolveTrendExecutionCandidateDirection } from "./trend-side-candidate";
 import { MarketSymbol, classifyRangeZone, rangeZoneLowerExtreme, rangeZoneUpperExtreme } from "../models/types";
 import { evaluateBtcShortMacroBullGate, evaluateEthShortLocationRrGate } from "./market-judgment/short-authority-gates";
-import { evaluateSameSideLossReentryGate } from "./state/loss-reentry-gate";
+import { evaluateSameSideLossReentryGate, evaluateOppositeSideLossReentryGate } from "./state/loss-reentry-gate";
 import { applyV2ExitAuthorityInvariants, isExplicitTerminalExitReason } from "./exit/exit-authority-invariant";
 import { resolveFinalExitAuthority } from "./exit/final-exit-authority";
 import { evaluateTerminalReentryBarrier, buildTerminalReentryBarrierProof, resolveTerminalBarrierContext } from "./lifecycle/terminal-reentry-barrier";
@@ -80,6 +80,7 @@ import {
     isStaleFtsLowerShortRejectEligibleForFreshRangeReevaluation,
     resetEthFtsLowerShortStaleState
 } from "./market-judgment/eth-fts-lower-short-stale-release";
+import { evaluateFastTrendShift5mConfirmation } from "./market-judgment/fast-trend-shift-authority";
 import { evaluateEthDirectionalAuthorityMismatch } from "./market-judgment/eth-directional-authority-reconciler";
 import { resolveFinalRegimeExecutionAuthority } from "./execution/entry-final-regime-authority";
 import {
@@ -2239,7 +2240,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         "ORDER_BUILD_FAIL",
         "FRESH_TICK_EXECUTION_BLOCKED",
         "FRESH_TICK_BARRIER_ACTIVE",
-        "WHIPSAW_SHOCK_RECHECK"
+        "WHIPSAW_SHOCK_RECHECK",
+        "FTS_CONFIRMATION_PENDING"
     ]);
     const hardBlockReasons = new Set<string>([
         "CRASH_ENTRY_GUARD_BLOCK",
@@ -2255,7 +2257,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         "DAILY_LOSS_GUARD",
         "FRESH_TICK_EXECUTION_BLOCKED",
         "FRESH_TICK_BARRIER_ACTIVE",
-        "WHIPSAW_SHOCK_RECHECK"
+        "WHIPSAW_SHOCK_RECHECK",
+        "FTS_CONFIRMATION_PENDING"
     ]);
     if (v2RejectReasonAfterPromotion === "WHIPSAW_SHOCK_RECHECK_TRANSITION_HOLD") v2RejectReasonAfterPromotion = "WHIPSAW_SHOCK_RECHECK";
 
@@ -2336,6 +2339,102 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             v2DecisionAfterPromotion = "HOLD";
             v2SideAfterPromotion = "none";
             v2RejectReasonAfterPromotion = "WAIT_RECHECK";
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Tier 3.5: Fast Trend Shift 5m Confirmation Gate & EXPEDITE Exception
+    // -------------------------------------------------------------------------
+    let isFtsConfirmationPending = false;
+    let isFtsExpedited = false;
+
+    const requestedFtsSide =
+        v2SideAfterPromotion === "long" || v2SideAfterPromotion === "short"
+            ? v2SideAfterPromotion
+            : trendSideCandidate === "long" || trendSideCandidate === "short"
+              ? trendSideCandidate
+              : v2SideBeforePromotion === "long" || v2SideBeforePromotion === "short"
+                ? v2SideBeforePromotion
+                : ftsDirection === "long" || ftsDirection === "short"
+                  ? ftsDirection
+                  : (input.snapshot as any)?.fastTrendShift?.direction === "long" || (input.snapshot as any)?.fastTrendShift?.direction === "short"
+                    ? (input.snapshot as any).fastTrendShift.direction
+                    : (authoritativeInput.snapshot as any)?.fastTrendShift?.direction === "long" || (authoritativeInput.snapshot as any)?.fastTrendShift?.direction === "short"
+                      ? (authoritativeInput.snapshot as any).fastTrendShift.direction
+                      : (authoritativeInput as any)?.intentSide === "long" || (authoritativeInput as any)?.intentSide === "short"
+                        ? (authoritativeInput as any).intentSide
+                        : "none";
+
+    const isFtsSignalPresent =
+        (isFtsActive || judgment.subtype === "FAST_TREND_SHIFT" || (execMeta as any)?.fast_trend_shift === true || ftsSubtype === "FAST_TREND_SHIFT" || (input.snapshot as any)?.fastTrendShift?.active === true || (authoritativeInput.snapshot as any)?.fastTrendShift?.active === true) &&
+        requestedFtsSide !== "none";
+
+    if (isFtsSignalPresent) {
+        const htf5m = (authoritativeInput.snapshot as any)?.htf_candles?.["5m"] ?? (input.snapshot as any)?.htf_candles?.["5m"] ?? (input.htf_candles as any)?.["5m"] ?? (input.snapshot as any)?.htfCandles?.["5m"] ?? null;
+        const candles1m = authoritativeInput.snapshot.candles ?? input.candles ?? null;
+
+        const ftsDetectedAt =
+            typeof ftsDiag?.detectedAt === "number" && ftsDiag.detectedAt > 0
+                ? ftsDiag.detectedAt
+                : typeof (ftsDiag as any)?.detected_at === "number" && (ftsDiag as any).detected_at > 0
+                  ? (ftsDiag as any).detected_at
+                  : typeof (input.snapshot as any)?.fastTrendShift?.detectedAt === "number" && (input.snapshot as any).fastTrendShift.detectedAt > 0
+                    ? (input.snapshot as any).fastTrendShift.detectedAt
+                    : typeof (authoritativeInput.snapshot as any)?.fastTrendShift?.detectedAt === "number" && (authoritativeInput.snapshot as any).fastTrendShift.detectedAt > 0
+                      ? (authoritativeInput.snapshot as any).fastTrendShift.detectedAt
+                      : input.now;
+
+        const fts5mEval = evaluateFastTrendShift5mConfirmation({
+            symbol: String(input.symbol),
+            side: requestedFtsSide,
+            lastPrice: Number(authoritativeInput.snapshot.lastPrice ?? 0),
+            boxHigh: Number((ftsDiag as any)?.boxHigh ?? authoritativeInput.snapshot.boxHigh ?? 0),
+            boxLow: Number((ftsDiag as any)?.boxLow ?? authoritativeInput.snapshot.boxLow ?? 0),
+            volumeExpansion: Number((authoritativeInput.snapshot as any)?.volumeExpansion ?? (input.snapshot as any)?.volumeExpansion ?? 1.0),
+            macroPolarity: (judgment.macroPolarity && String(judgment.macroPolarity) !== "NEUTRAL" && String(judgment.macroPolarity).toLowerCase() !== "data_not_ready")
+                ? judgment.macroPolarity
+                : (authoritativeInput.snapshot as any)?.macroPolarity ?? (input.snapshot as any)?.macroPolarity ?? judgment.macroPolarity ?? null,
+            htf1hBias: ((judgment as any)?.htf_1h_bias && (judgment as any).htf_1h_bias !== "DATA_NOT_READY")
+                ? (judgment as any).htf_1h_bias
+                : (judgment.diagnostics as any)?.htf_1h_bias ?? (authoritativeInput.snapshot as any)?.htf1hBias ?? (input.snapshot as any)?.htf1hBias ?? null,
+            htf4hBias: ((judgment as any)?.htf_4h_bias && (judgment as any).htf_4h_bias !== "DATA_NOT_READY")
+                ? (judgment as any).htf_4h_bias
+                : (judgment.diagnostics as any)?.htf_4h_bias ?? (authoritativeInput.snapshot as any)?.htf4hBias ?? (input.snapshot as any)?.htf4hBias ?? null,
+            candles1m,
+            candles5m: htf5m,
+            ftsDetectedAt,
+            now: input.now ?? Date.now()
+        });
+
+        if (fts5mEval.expedited) {
+            isFtsExpedited = true;
+            (execMeta as any).fts_expedited = true;
+            if (!execution.metadata) execution.metadata = {};
+            (execution.metadata as any).fts_expedited = true;
+            execMeta.retest_required = false;
+        } else if (!fts5mEval.confirmed) {
+            isFtsConfirmationPending = true;
+            v2RejectReasonAfterPromotion = "FTS_CONFIRMATION_PENDING";
+            expectedMissingCondition = "FTS_CONFIRMATION_PENDING";
+            expectedNextAction = "WAIT_FOR_5M_CANDLE_CONFIRMATION";
+            hardBlockPresent = true;
+            hardBlockReason = "FTS_CONFIRMATION_PENDING";
+
+            const isRangeRegimeCtx =
+                authoritativeInput.snapshot.canonicalRegime === "RANGE" ||
+                input.snapshot.canonicalRegime === "RANGE" ||
+                judgment.regime === "RANGE" ||
+                (input.snapshot as any)?.canonical_regime === "RANGE";
+            const currentBoxPosVal = Number(authoritativeInput.snapshot.boxPos ?? (input.snapshot as any)?.boxPos ?? 0.5);
+            const isRangeEdgeHardVetoPending =
+                isRangeRegimeCtx &&
+                ((requestedFtsSide === "short" && currentBoxPosVal <= 0.25) ||
+                 (requestedFtsSide === "long" && currentBoxPosVal >= 0.75));
+
+            if (!isRangeEdgeHardVetoPending && v2DecisionAfterPromotion === "ENTER") {
+                v2DecisionAfterPromotion = "HOLD";
+                v2SideAfterPromotion = "none";
+            }
         }
     }
 
@@ -2884,6 +2983,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             }
         }
         const trendPromotionCandidate =
+            !isFtsConfirmationPending &&
+            v2RejectReasonAfterPromotion !== "FTS_CONFIRMATION_PENDING" &&
             promotionBlockReason == null &&
             !shockReactionWatchActive &&
             (v2DecisionAfterPromotion === "SKIP" || v2DecisionAfterPromotion === "HOLD" || v2SideAfterPromotion === "none") &&
@@ -2912,6 +3013,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
 
         const rangePromotionCandidate =
+            !isFtsConfirmationPending &&
+            v2RejectReasonAfterPromotion !== "FTS_CONFIRMATION_PENDING" &&
             promotionBlockReason == null &&
             !shockReactionWatchActive &&
             (v2DecisionAfterPromotion === "SKIP" || v2DecisionAfterPromotion === "HOLD" || v2SideAfterPromotion === "none") &&
@@ -2958,6 +3061,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             (trendSideCandidate !== "none" ? trendSideCandidate : rangeSideCandidate);
 
         const saPromotionNeeded =
+            !isFtsConfirmationPending &&
+            v2RejectReasonAfterPromotion !== "FTS_CONFIRMATION_PENDING" &&
             (entryQualityGrade === "S" || entryQualityGrade === "A") &&
             saCandidateSide !== "none" &&
             !shockReactionWatchActive &&
@@ -3170,7 +3275,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         const recheckPromotionEligible =
             !whipsawShockRecheckActive &&
             v2RejectReasonAfterPromotion === "WAIT_RECHECK" &&
-            reviewingTicks >= 2 && // 2~3??諛섎났
+            !isFtsConfirmationPending &&
+            reviewingTicks >= 2 && // 2~3회 반복
             hardControlClear === true &&
             hardBlockPresent === false &&
             paperExecutionReady === true &&
@@ -6047,8 +6153,25 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
     }
 
-    const finalDecisionBeforeVeto = v2DecisionAfterPromotion;
-    const sideCandidateBeforeVeto = v2SideAfterPromotion;
+    const isConflictChaseShortBlocked =
+        v2RejectReasonAfterPromotion === "CHASE_SHORT_DISALLOWED_LOWER" &&
+        nativeExecutorEnterAuthority &&
+        v2SideBeforePromotion === "short";
+
+    const isConflictChaseLongBlocked =
+        v2RejectReasonAfterPromotion === "CHASE_LONG_DISALLOWED_UPPER" &&
+        nativeExecutorEnterAuthority &&
+        v2SideBeforePromotion === "long";
+
+    const finalDecisionBeforeVeto =
+        (isConflictChaseShortBlocked || isConflictChaseLongBlocked)
+            ? "ENTER"
+            : v2DecisionAfterPromotion;
+
+    const sideCandidateBeforeVeto =
+        (isConflictChaseShortBlocked || isConflictChaseLongBlocked)
+            ? v2SideBeforePromotion
+            : v2SideAfterPromotion;
     let vetoReason: string | null = null;
     const rangeLowerShortMismatchByReason = signalGateBlockedReason === "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT";
     const rangeUpperLongMismatchByReason = signalGateBlockedReason === "RANGE_SIDE_ZONE_MISMATCH_UPPER_LONG";
@@ -6062,6 +6185,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const isConflictResolvedTrendShortPromotion = !rangeZoneVetoApplicable && promotionReason === "V2_CONFLICT_RESOLVED_TREND_SHORT";
     const isRangeTrendReclaimProbePromotion = promotionReason === "V2_RANGE_TREND_RECLAIM_MICRO_PROBE";
     const isTrendQualifiedFinalPromotion =
+        !isFtsConfirmationPending &&
+        v2RejectReasonAfterPromotion !== "FTS_CONFIRMATION_PENDING" &&
         !rangeZoneVetoApplicable &&
         (promotionReason === "V2_TREND_QUALIFIED_FINAL_PROMOTION" ||
         (isTrendAuthorityCandidate && promotionApplied === true));
@@ -6070,7 +6195,8 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         isRangeTrendReclaimProbePromotion ||
         isStairStepPromotion ||
         isTrendContinuationRevalidatedPromotion ||
-        isTrendQualifiedFinalPromotion;
+        isTrendQualifiedFinalPromotion ||
+        isFtsExpedited;
     const execMetaRecord = execMeta as Record<string, unknown>;
     const nativeExecutorFastProbeCoverage =
         nativeExecutorEnterAuthority &&
@@ -6086,6 +6212,65 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         isConflictResolvedTrendShortPromotion ||
         (!rangeZoneVetoApplicable && nativeExecutorFastProbeCoverage);
 
+    const nativeFtsLowerShortDeferZoneVeto =
+        !ethFtsLowerShortStaleActive &&
+        nativeExecutorEnterAuthority === true &&
+        nativeExecutorFastProbeCoverage === true &&
+        judgment.subtype === "FAST_TREND_SHIFT" &&
+        v2SideBeforePromotion === "short" &&
+        zone === "lower" &&
+        isRangeRouting;
+
+    const continuationStateForZoneVeto = rangeContinuationStateMap.get(String(input.symbol));
+    const retestConfirmedLocal =
+        execMetaRecord.retest_confirmed === true ||
+        execMetaRecord.retestConfirmed === true ||
+        authoritativeInput.snapshot.retestConfirmed === true ||
+        (judgment.metadata as Record<string, unknown> | undefined)?.retestConfirmed === true ||
+        (execMetaRecord.retestTouched === true && execMetaRecord.retestRejected === true) ||
+        (authoritativeInput.snapshot.retestTouched === true && authoritativeInput.snapshot.retestRejected === true) ||
+        (continuationStateForZoneVeto?.phase === "RETEST_TOUCHED" && continuationStateForZoneVeto?.direction === "down" && (boxBreakSide === "lower" || boxBreakSide === "down")) ||
+        execMetaRecord.fts_expedited === true ||
+        (execution.metadata as Record<string, unknown> | undefined)?.fts_expedited === true ||
+        isFtsExpedited;
+
+    const isLowerBreakdownTrendConfirmed =
+        (boxBreakSide === "lower" || boxBreakSide === "down") &&
+        retestConfirmedLocal &&
+        (finalRegimeExecutionAuthority.regime_final === "TREND" || activeEngineRouting === "TREND" || isFtsExpedited || nativeFtsLowerShortDeferZoneVeto);
+
+    const isUpperBreakoutTrendConfirmed =
+        (boxBreakSide === "upper" || boxBreakSide === "up") &&
+        retestConfirmedLocal &&
+        (finalRegimeExecutionAuthority.regime_final === "TREND" || activeEngineRouting === "TREND" || isFtsExpedited);
+
+    const isCanonicalOrDetectedRange =
+        finalRegimeExecutionAuthority.canonical_regime === "RANGE" ||
+        authoritativeInput.snapshot.canonicalRegime === "RANGE" ||
+        judgment.regime === "RANGE";
+
+    const isRangeExecutionAuthority =
+        rangeZoneVetoApplicable ||
+        finalRegimeExecutionAuthority.regime_final === "RANGE" ||
+        activeEngineRouting === "RANGE" ||
+        (isCanonicalOrDetectedRange && !isLowerBreakdownTrendConfirmed && !isUpperBreakoutTrendConfirmed);
+
+    // RANGE Edge Directional Hard Veto:
+    // When execution authority is RANGE:
+    // boxPos < 0.25 (or <= rangeLowerThreshold) SHORT is strictly forbidden unless true breakdown + retest + TREND authority confirmed
+    // boxPos > 0.75 (or >= rangeUpperThreshold) LONG is strictly forbidden unless true breakout + retest + TREND authority confirmed
+    const rangeLowerEdgeHardVeto =
+        isRangeExecutionAuthority &&
+        sideCandidateBeforeVeto === "short" &&
+        (rangeLowerShortMismatchByReason || (boxPos ?? 0.5) <= 0.25 || (boxPos ?? 0.5) <= rangeLowerThreshold) &&
+        !isLowerBreakdownTrendConfirmed;
+
+    const rangeUpperEdgeHardVeto =
+        isRangeExecutionAuthority &&
+        sideCandidateBeforeVeto === "long" &&
+        (rangeUpperLongMismatchByReason || (boxPos ?? 0.5) >= 0.75 || (boxPos ?? 0.5) >= rangeUpperThreshold) &&
+        !isUpperBreakoutTrendConfirmed;
+
     const rangeLowerShortMismatchRaw =
         rangeZoneVetoApplicable &&
         sideCandidateBeforeVeto === "short" &&
@@ -6098,16 +6283,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
 
     const rangeLowerShortMismatchBeforeExemption =
         rangeLowerShortMismatchRaw && !isNonRangeExecutionLineage;
-    const nativeFtsLowerShortDeferZoneVeto =
-        !ethFtsLowerShortStaleActive &&
-        nativeExecutorEnterAuthority === true &&
-        nativeExecutorFastProbeCoverage === true &&
-        judgment.subtype === "FAST_TREND_SHIFT" &&
-        v2SideBeforePromotion === "short" &&
-        zone === "lower" &&
-        isRangeRouting;
     const rangeLowerShortMismatch =
-        rangeLowerShortMismatchBeforeExemption && !nativeFtsLowerShortDeferZoneVeto;
+        rangeLowerEdgeHardVeto ||
+        (rangeLowerShortMismatchBeforeExemption && !nativeFtsLowerShortDeferZoneVeto);
     const judgmentMetaForNativeUpper = (judgment.metadata ?? {}) as Record<string, unknown>;
     const continuationStateForNativeUpper = rangeContinuationStateMap.get(String(input.symbol));
     const hasSameSidePositionForNativeUpper = v2State.currentPositions.some(
@@ -6220,9 +6398,10 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     const rangeUpperLongMismatchBeforeExemption =
         rangeUpperLongMismatchRaw && !isNonRangeExecutionLineage;
     const rangeUpperLongMismatch =
-        rangeUpperLongMismatchBeforeExemption &&
+        rangeUpperEdgeHardVeto ||
+        (rangeUpperLongMismatchBeforeExemption &&
         !nativeExecutorUpperBreakoutConfirmed &&
-        !(nativeFastTrendShiftUpperLongEval.confirmed === true);
+        !(nativeFastTrendShiftUpperLongEval.confirmed === true));
     // PROBE_ONLY + polarityProbeEligible exemption: an executor ENTER under HTF PROBE_ONLY
     // with confirmed polarity probe eligibility must not be blocked by a range signal downgrade.
     // The HTF probe authority already accounts for the reduced sizing (htf_size_multiplier).
@@ -6262,11 +6441,13 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         !shockRecoveryHint &&
         !isNonRangeExecutionLineage;
 
-    if (v2DecisionAfterPromotion === "ENTER") {
+    if (v2DecisionAfterPromotion === "ENTER" || finalDecisionBeforeVeto === "ENTER") {
         if (rangeLowerShortMismatch && !execMeta.sideOverrideApplied) {
             vetoReason = "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT";
         } else if (rangeUpperLongMismatch && !execMeta.sideOverrideApplied) {
             vetoReason = "RANGE_SIDE_ZONE_MISMATCH_UPPER_LONG";
+        } else if (isFtsConfirmationPending || v2RejectReasonAfterPromotion === "FTS_CONFIRMATION_PENDING") {
+            vetoReason = "FTS_CONFIRMATION_PENDING";
         } else if (rangeDowngradedHardBlock) {
             vetoReason = "RANGE_SIGNAL_DOWNGRADED_NOT_RELAXED";
         } else if (entryCandidateHardBlock) {
@@ -6317,6 +6498,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
     }));
 
     const isBypassRangeShortReversal =
+        !rangeLowerEdgeHardVeto &&
         vetoReason != null &&
         shortReversalWatchPromoted === true &&
         promotionApplied === true &&
@@ -6324,6 +6506,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         finalDecisionBeforeVeto === "ENTER";
 
     const isBypassRangeVeto =
+        !rangeLowerEdgeHardVeto &&
         vetoReason != null &&
         shock === "DOWN" &&
         (judgment.htf_entry_policy === "SHORT_ONLY_OR_NONE" || judgment.htf_entry_policy === "SHORT_ONLY") &&
@@ -6335,6 +6518,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         hardBlockPresent === false;
 
     const isBypassRangeUpperLong =
+        !rangeUpperEdgeHardVeto &&
         vetoReason != null &&
         shock === "UP" &&
         (shockReactionAllowedPrimarySide === "long" || riskLongAllow === true || allowNewLong === true) &&
@@ -7280,7 +7464,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             }
             const shockDownBlanketException = shock === "DOWN" && !isFastTrendShiftLowerShort;
             const shortException = isFastTrendShiftLowerShort
-                ? fastTrendShiftLowerBreakdownConfirmed
+                ? (fastTrendShiftLowerBreakdownConfirmed || isFtsExpedited)
                 : (
                     breakdownRetestFailure ||
                     boxBreakSideFinal === "lower" ||
@@ -7431,7 +7615,7 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 (isConflictResolvedTrendLongPromotion && sideFinal === "long") ||
                 (isUpperLongProbePromotion && sideFinal === "long") ||
                 (isRangeTrendReclaimProbePromotion && sideFinal === "long") ||
-                (isFastTrendShiftUpperLong && fastTrendShiftUpperBreakoutConfirmed);
+                (isFastTrendShiftUpperLong && (fastTrendShiftUpperBreakoutConfirmed || isFtsExpedited));
             const htfStrongBearish = htfHardBlockReason === "STRONG_BEARISH_HTF_ALIGNMENT";
 
             if (!longException || (htfStrongBearish && !isPolarityReversalMicroProbePromotion && !isConflictResolvedTrendLongPromotion && !isRangeTrendReclaimProbePromotion)) {
@@ -7508,34 +7692,81 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
         }
     }
 
+    // Tier 5.55: FTS Confirmation Invariant Enforcer Gate
+    // FTS 5m candle confirmation pending 상태에서는 그 어떤 프로모션 / 오버라이드로도 ENTER 승격 절대 불가
+    if (isFtsConfirmationPending || v2RejectReasonAfterPromotion === "FTS_CONFIRMATION_PENDING") {
+        if (v2DecisionAfterPromotion === "ENTER") {
+            v2DecisionAfterPromotion = "HOLD";
+            v2SideAfterPromotion = "none";
+            promotionApplied = false;
+            promotionReason = null;
+        }
+        v2RejectReasonAfterPromotion = "FTS_CONFIRMATION_PENDING";
+        hardBlockPresent = true;
+        hardBlockReason = "FTS_CONFIRMATION_PENDING";
+        expectedMissingCondition = "FTS_CONFIRMATION_PENDING";
+        expectedNextAction = "WAIT_FOR_5M_CANDLE_CONFIRMATION";
+    }
+
     if (v2DecisionAfterPromotion === "ENTER" && (v2SideAfterPromotion === "long" || v2SideAfterPromotion === "short")) {
-        const lossGateResult = evaluateSameSideLossReentryGate({
-            symbol: String(input.symbol),
-            requestedSide: v2SideAfterPromotion,
-            currentPrice: Number(authoritativeInput.snapshot.lastPrice ?? 0),
-            now: input.now,
-            lastLossState: v2State.lastLossReentryState,
-            candles: authoritativeInput.snapshot.candles,
-            atr: Number(authoritativeInput.snapshot.atr ?? 0),
-            feeBreakEvenPct: (riskSizing as any)?.feeBreakEvenPct ?? (riskSizing.diagnostics as any)?.fee_break_even_pct ?? 0.002,
-            rangeBoxHigh: Number(authoritativeInput.snapshot.boxHigh ?? 0),
-            rangeBoxLow: Number(authoritativeInput.snapshot.boxLow ?? 0),
-            rangeBoxMid: Number(
-                authoritativeInput.snapshot.boxHigh && authoritativeInput.snapshot.boxLow
-                    ? (authoritativeInput.snapshot.boxHigh + authoritativeInput.snapshot.boxLow) / 2
-                    : 0
-            ),
-            regime: judgment.regime,
-            subtype: judgment.subtype,
-            zone,
-            rangeCycleCount: typeof (authoritativeInput.snapshot as any).rangeCycleCount === "number" ? (authoritativeInput.snapshot as any).rangeCycleCount : null,
-            reversalConfirmed,
-            trendOk,
-            qualityScore,
-            htfEntryPolicy: judgment.htf_entry_policy ?? null,
-            macroPolarity: judgment.macroPolarity ?? null,
-            directionalShockState: v2State.directionalShockState ?? null
-        });
+        const isOppositeLossSide =
+            v2State.lastLossReentryState != null &&
+            v2SideAfterPromotion !== v2State.lastLossReentryState.lastLossExitSide;
+
+        const lossGateResult = isOppositeLossSide
+            ? evaluateOppositeSideLossReentryGate({
+                symbol: String(input.symbol),
+                requestedSide: v2SideAfterPromotion,
+                currentPrice: Number(authoritativeInput.snapshot.lastPrice ?? 0),
+                now: input.now,
+                lastLossState: v2State.lastLossReentryState,
+                candles: authoritativeInput.snapshot.candles,
+                atr: Number(authoritativeInput.snapshot.atr ?? 0),
+                feeBreakEvenPct: (riskSizing as any)?.feeBreakEvenPct ?? (riskSizing.diagnostics as any)?.fee_break_even_pct ?? 0.002,
+                rangeBoxHigh: Number(authoritativeInput.snapshot.boxHigh ?? 0),
+                rangeBoxLow: Number(authoritativeInput.snapshot.boxLow ?? 0),
+                rangeBoxMid: Number(
+                    authoritativeInput.snapshot.boxHigh && authoritativeInput.snapshot.boxLow
+                        ? (authoritativeInput.snapshot.boxHigh + authoritativeInput.snapshot.boxLow) / 2
+                        : 0
+                ),
+                regime: judgment.regime,
+                subtype: judgment.subtype,
+                zone,
+                reversalConfirmed,
+                trendOk,
+                qualityScore,
+                htfEntryPolicy: judgment.htf_entry_policy ?? null,
+                macroPolarity: judgment.macroPolarity ?? null,
+                directionalShockState: v2State.directionalShockState ?? null
+            })
+            : evaluateSameSideLossReentryGate({
+                symbol: String(input.symbol),
+                requestedSide: v2SideAfterPromotion,
+                currentPrice: Number(authoritativeInput.snapshot.lastPrice ?? 0),
+                now: input.now,
+                lastLossState: v2State.lastLossReentryState,
+                candles: authoritativeInput.snapshot.candles,
+                atr: Number(authoritativeInput.snapshot.atr ?? 0),
+                feeBreakEvenPct: (riskSizing as any)?.feeBreakEvenPct ?? (riskSizing.diagnostics as any)?.fee_break_even_pct ?? 0.002,
+                rangeBoxHigh: Number(authoritativeInput.snapshot.boxHigh ?? 0),
+                rangeBoxLow: Number(authoritativeInput.snapshot.boxLow ?? 0),
+                rangeBoxMid: Number(
+                    authoritativeInput.snapshot.boxHigh && authoritativeInput.snapshot.boxLow
+                        ? (authoritativeInput.snapshot.boxHigh + authoritativeInput.snapshot.boxLow) / 2
+                        : 0
+                ),
+                regime: judgment.regime,
+                subtype: judgment.subtype,
+                zone,
+                rangeCycleCount: typeof (authoritativeInput.snapshot as any).rangeCycleCount === "number" ? (authoritativeInput.snapshot as any).rangeCycleCount : null,
+                reversalConfirmed,
+                trendOk,
+                qualityScore,
+                htfEntryPolicy: judgment.htf_entry_policy ?? null,
+                macroPolarity: judgment.macroPolarity ?? null,
+                directionalShockState: v2State.directionalShockState ?? null
+            });
 
         if (!lossGateResult.allowed) {
             const decisionBeforeLossBlock = v2DecisionAfterPromotion;
@@ -7545,7 +7776,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             promotionApplied = false;
             promotionReason = null;
             expectedMissingCondition = lossGateResult.reason;
-            expectedNextAction = "WAIT_FOR_MEANINGFUL_DISPLACEMENT_OR_FRESH_SETUP";
+            expectedNextAction = isOppositeLossSide
+                ? "WAIT_FOR_OPPOSITE_SIDE_CONFIRMATION_AND_COOLDOWN"
+                : "WAIT_FOR_MEANINGFUL_DISPLACEMENT_OR_FRESH_SETUP";
         }
     }
 
@@ -8182,6 +8415,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 } else if (highwayGateRejected) {
                     blockProbe = true;
                     blockedReason = "HIGHWAY_ENTRY_GATE_REJECTED";
+                } else if (isFtsConfirmationPending || v2RejectReasonAfterPromotion === "FTS_CONFIRMATION_PENDING") {
+                    blockProbe = true;
+                    blockedReason = "FTS_CONFIRMATION_PENDING";
                 }
             }
 
@@ -10819,6 +11055,24 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
                 appliedLeverage: riskSizing.appliedLeverage,
                 stopPrice: Number(v2StopPrice),
                 invalidationPx: Number(v2InvalidationPx),
+                plannedTp1Price: Number(
+                    (execution as any)?.takeProfit1Px ??
+                    (execution?.metadata as any)?.takeProfit1Px ??
+                    (authoritativeInput.snapshot as any)?.takeProfit1Px ??
+                    (input.snapshot as any)?.takeProfit1Px ??
+                    (authoritativeInput.snapshot as any)?.takeProfitPlan?.tp1Price ??
+                    (input.snapshot as any)?.takeProfitPlan?.tp1Price ??
+                    (normalizedV2Side === "short" ? Number(authoritativeInput.snapshot.lastPrice) * 0.98 : Number(authoritativeInput.snapshot.lastPrice) * 1.02)
+                ),
+                takeProfitPrice: Number(
+                    (execution as any)?.takeProfit1Px ??
+                    (execution?.metadata as any)?.takeProfit1Px ??
+                    (authoritativeInput.snapshot as any)?.takeProfit1Px ??
+                    (input.snapshot as any)?.takeProfit1Px ??
+                    (authoritativeInput.snapshot as any)?.takeProfitPlan?.tp1Price ??
+                    (input.snapshot as any)?.takeProfitPlan?.tp1Price ??
+                    (normalizedV2Side === "short" ? Number(authoritativeInput.snapshot.lastPrice) * 0.98 : Number(authoritativeInput.snapshot.lastPrice) * 1.02)
+                ),
                 ts: authorityCreatedAt,
                 authorityCreatedAt
             }
@@ -12049,6 +12303,10 @@ export function adaptV2Input(
             canonicalRangeConfidence: snapshot.canonicalRangeConfidence,
             canonicalTrendWeaknessScore: snapshot.canonicalTrendWeaknessScore,
             canonicalRegimeAmbiguous: snapshot.canonicalRegimeAmbiguous,
+            macroPolarity: (snapshot as any).macroPolarity ?? null,
+            fastTrendShift: (snapshot as any).fastTrendShift ?? null,
+            htf1hBias: (snapshot as any).htf1hBias ?? (snapshot as any).htf_1h_bias ?? null,
+            htf4hBias: (snapshot as any).htf4hBias ?? (snapshot as any).htf_4h_bias ?? null,
             ...(typeof snapshot.tickSz === "number" && Number.isFinite(snapshot.tickSz) && snapshot.tickSz > 0
                 ? { tickSz: snapshot.tickSz }
                 : {})

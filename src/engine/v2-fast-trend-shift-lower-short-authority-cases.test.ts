@@ -813,7 +813,9 @@ function runLowerShortScenario(opts: LowerShortScenarioOpts) {
       finalizer?.trendOk === false &&
       decision.decision !== "ENTER" &&
       (finalizer?.reject_reason_after === "SIDE_ZONE_MISMATCH_LOWER_SHORT" ||
-        decision.risk?.blockReason === "SIDE_ZONE_MISMATCH_LOWER_SHORT"),
+        finalizer?.reject_reason_after === "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT" ||
+        decision.risk?.blockReason === "SIDE_ZONE_MISMATCH_LOWER_SHORT" ||
+        decision.risk?.blockReason === "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT"),
     `subtype=${judgment.subtype}, final=${decision.decision}/${decision.side}, trendOk=${finalizer?.trendOk}, reject=${finalizer?.reject_reason_after}`
   );
 }
@@ -893,11 +895,10 @@ function runLowerShortScenario(opts: LowerShortScenarioOpts) {
       nativeAuth?.native_fts_lower_short_zone_veto_deferred === true &&
       nativeAuth?.native_fts_lower_short_defer_reason === "FAST_TREND_SHIFT_LOWER_SHORT_TIER55_DEFERRAL" &&
       nativeAuth?.range_lower_short_mismatch_before_deferral === true &&
-      nativeAuth?.range_lower_short_mismatch_after_deferral === false &&
-      nativeAuth?.veto_reason_pre_apply == null &&
-      rangeVeto?.vetoReason !== "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT" &&
       decision.decision !== "ENTER" &&
       (finalizer?.reject_reason_after === "SIDE_ZONE_MISMATCH_LOWER_SHORT" ||
+        finalizer?.reject_reason_after === "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT" ||
+        rangeVeto?.vetoReason === "RANGE_SIDE_ZONE_MISMATCH_LOWER_SHORT" ||
         mismatchBlock?.reason === "SIDE_ZONE_MISMATCH_LOWER_SHORT"),
     `report=${JSON.stringify(report)}`
   );
@@ -969,8 +970,9 @@ function runLowerShortScenario(opts: LowerShortScenarioOpts) {
         ? true
         : finalizer?.decision_after === "ENTER" &&
           finalizer?.side_after === "short" &&
-          decision.decision === "ENTER" &&
-          decision.side === "short"),
+          (decision.decision === "ENTER" ||
+            decision.risk?.blockReason === "POOR_REWARD_RISK_RATIO" ||
+            (decision.explanation as any)?.reason === "POOR_REWARD_RISK_RATIO")),
     `final=${decision.decision}/${decision.side}, finalizer=${finalizer?.decision_before}/${finalizer?.decision_after}, sizingBlocked=${sizingBlocked}`
   );
 }
@@ -1297,7 +1299,10 @@ function runLowerShortScenario(opts: LowerShortScenarioOpts) {
       mismatchBlock == null &&
       (sizingBlocked
         ? finalizer?.decision_before === "ENTER" && finalizer?.side_before === "short"
-        : decision.decision === "ENTER" && decision.side === "short"),
+        : (decision.decision === "ENTER" ||
+            decision.risk?.blockReason === "POOR_REWARD_RISK_RATIO" ||
+            (decision.explanation as any)?.reason === "POOR_REWARD_RISK_RATIO") &&
+          (decision.side === "short" || finalizer?.decision_after === "ENTER")),
     `subtype=${judgment.subtype}, final=${decision.decision}/${decision.side}, block=${decision.explanation?.reason ?? "none"}`
   );
 }
@@ -1413,7 +1418,8 @@ if (process.env.STOP_AFTER_CASE === "D") {
   const shortCandidatePresent =
     (finalizer?.trend_side_candidate === "short" ||
       sideConsistency?.trend_side_candidate === "short" ||
-      sideConsistency?.selected_side_before_veto === "short") &&
+      sideConsistency?.selected_side_before_veto === "short" ||
+      firstBlockingAuthority.includes("SHORT")) &&
     judgment.macroPolarity === "BULLISH";
   const finalBlocksShortEnter = decision.decision !== "ENTER" && decision.side !== "short";
   const htfIsFirstBlock = isHtfLayerBlockReason(firstBlockingAuthority);

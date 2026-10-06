@@ -41,7 +41,7 @@ import type { PaperSignal } from "../strategy/entry-signal";
 import type { PaperCandidateStrength } from "../strategy/entry-signal";
 import { PIPELINE_VERSION } from "./decision-funnel";
 import { RANGE_ZONE_ACTION_POLICY } from "./range-engine";
-import { evaluateSameSideLossReentryGate, type LastLossReentryState } from "../engine-v2/state/loss-reentry-gate";
+import { evaluateSameSideLossReentryGate, evaluateOppositeSideLossReentryGate, type LastLossReentryState } from "../engine-v2/state/loss-reentry-gate";
 import { classifyRangeZone, type Candle, type RangeBoxZone } from "../models/types";
 import {
   evaluateDirectionalTrendEntryGuard,
@@ -3657,26 +3657,47 @@ export function evaluatePaperSymbolEntry(input: EvaluatePaperSymbolEntryInput): 
   }
 
   if (intentSide && input.lastLossReentryState) {
-    const lossGate = evaluateSameSideLossReentryGate({
-      symbol: String(sym),
-      requestedSide: intentSide,
-      currentPrice: Number(sn?.lastPrice ?? 0),
-      now: input.now,
-      lastLossState: input.lastLossReentryState,
-      candles: sn?.candles,
-      atr: sn?.atr,
-      rangeBoxHigh: sn?.boxHigh,
-      rangeBoxLow: sn?.boxLow,
-      regime: input.regime,
-      zone: typeof sn?.boxPos === "number" ? classifyRangeZone(sn.boxPos) : null,
-      rangeCycleCount: sn?.rangeCycleCount
-    });
+    const isOppositeLossSide = intentSide !== input.lastLossReentryState.lastLossExitSide;
+    const lossGate = isOppositeLossSide
+      ? evaluateOppositeSideLossReentryGate({
+          symbol: String(sym),
+          requestedSide: intentSide,
+          currentPrice: Number(sn?.lastPrice ?? 0),
+          now: input.now,
+          lastLossState: input.lastLossReentryState,
+          candles: sn?.candles,
+          atr: sn?.atr,
+          rangeBoxHigh: sn?.boxHigh,
+          rangeBoxLow: sn?.boxLow,
+          regime: input.regime,
+          zone: typeof sn?.boxPos === "number" ? classifyRangeZone(sn.boxPos) : null,
+          reversalConfirmed: (sn as any)?.reversalConfirmed ?? false
+        })
+      : evaluateSameSideLossReentryGate({
+          symbol: String(sym),
+          requestedSide: intentSide,
+          currentPrice: Number(sn?.lastPrice ?? 0),
+          now: input.now,
+          lastLossState: input.lastLossReentryState,
+          candles: sn?.candles,
+          atr: sn?.atr,
+          rangeBoxHigh: sn?.boxHigh,
+          rangeBoxLow: sn?.boxLow,
+          regime: input.regime,
+          zone: typeof sn?.boxPos === "number" ? classifyRangeZone(sn.boxPos) : null,
+          rangeCycleCount: sn?.rangeCycleCount
+        });
     if (!lossGate.allowed) {
       risk_state = "COOLDOWN";
-      risk_cooldown_subreason = "same_side_loss_reentry_hysteresis_blocked";
+      risk_cooldown_subreason = isOppositeLossSide
+        ? "opposite_side_loss_reentry_cooldown_blocked"
+        : "same_side_loss_reentry_hysteresis_blocked";
       reject_reason = "RISK_FAIL_REENTRY";
       final_decision = "REJECT";
-      supplemental_reasons.push("SAME_SIDE_LOSS_REENTRY_HYSTERESIS_BLOCKED");
+      supplemental_reasons.push(isOppositeLossSide
+        ? "OPPOSITE_SIDE_LOSS_REENTRY_COOLDOWN_BLOCKED"
+        : "SAME_SIDE_LOSS_REENTRY_HYSTERESIS_BLOCKED"
+      );
     }
   }
 
