@@ -7872,7 +7872,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             config: authoritativeInput.config,
             hasExistingPosition: hasExistingPos,
             softExitCooldownActive: softCooldownActive,
-            directionalShockState: v2State.directionalShockState ?? "NONE"
+            directionalShockState: v2State.directionalShockState ?? "NONE",
+            recoveryAuthority: judgment.diagnostics?.recoveryAuthority ?? null,
+            phaseAuthority: judgment.diagnostics?.phaseAuthority ?? null
         });
 
         if (!highwayGate.allowed) {
@@ -11951,7 +11953,9 @@ export function runEngineV2(input: EngineV2Input): { decision: EngineV2Decision;
             config: authoritativeInput.config,
             hasExistingPosition: false,
             softExitCooldownActive: isSoftExitCooldownActive(String(input.symbol), input.now),
-            directionalShockState: v2State.directionalShockState ?? "NONE"
+            directionalShockState: v2State.directionalShockState ?? "NONE",
+            recoveryAuthority: judgment.diagnostics?.recoveryAuthority ?? null,
+            phaseAuthority: judgment.diagnostics?.phaseAuthority ?? null
         });
 
         if (!finalHighwayGate.allowed || highwayGateRejected) {

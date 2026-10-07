@@ -14,7 +14,10 @@ export interface HighwayEntryGateInput {
     softExitCooldownActive?: boolean;
     directionalShockState?: string | null;
     isPreCheck?: boolean;
+    recoveryAuthority?: import("../state/recovery-authority").RecoveryAuthorityResult | null;
+    phaseAuthority?: import("../state/phase-authority").PhaseAuthorityResult | null;
 }
+
 
 export interface HighwayEntryGateResult {
     allowed: boolean;
@@ -417,6 +420,206 @@ export function evaluateHighwayCoreEntryGate(input: HighwayEntryGateInput): High
         }
     }
 
+    // Step 6: Opposite Confirmed Recovery Chase Guard (Candidate 2)
+    // Disallow chasing late trend when market structurally confirmed opposite recovery,
+    // until that recovery is invalidated by fresh continuation/break.
+    const snapDiag = (snapshot?.diagnostics ?? {}) as Record<string, any>;
+    const recAuth =
+        input.recoveryAuthority ??
+        snapDiag.recoveryAuthority ??
+        execMeta.recoveryAuthority ??
+        (input as any).judgment?.diagnostics?.recoveryAuthority ??
+        null;
+
+    let recoveryConfirmed = false;
+    let recoveryDirection = "none";
+    let recoveryEvidence: readonly string[] = [];
+
+    if (recAuth != null) {
+        recoveryConfirmed = recAuth.recovery_confirmed === true;
+        recoveryDirection = String(recAuth.recovery_direction ?? "none").toLowerCase();
+        recoveryEvidence = recAuth.recovery_evidence ?? [];
+    } else {
+        recoveryConfirmed = execMeta.recovery_confirmed === true || snapDiag.recovery_confirmed === true;
+        recoveryDirection = String(execMeta.recovery_direction ?? snapDiag.recovery_direction ?? "none").toLowerCase();
+        recoveryEvidence = (execMeta.recovery_evidence as readonly string[]) ?? [];
+    }
+
+    const phaseAuth =
+        input.phaseAuthority ??
+        snapDiag.phaseAuthority ??
+        execMeta.phaseAuthority ??
+        null;
+
+    const higherLow = Boolean(
+        phaseAuth?.higher_low ??
+        execMeta.higher_low ??
+        snapDiag.higher_low ??
+        snapshot?.higher_low ??
+        recoveryEvidence.includes("HIGHER_LOW")
+    );
+    const higherHigh = Boolean(
+        phaseAuth?.higher_high ??
+        execMeta.higher_high ??
+        snapDiag.higher_high ??
+        snapshot?.higher_high ??
+        recoveryEvidence.includes("HIGHER_HIGH")
+    );
+    const lowerLow = Boolean(
+        phaseAuth?.lower_low ??
+        execMeta.lower_low ??
+        snapDiag.lower_low ??
+        snapshot?.lower_low ??
+        recoveryEvidence.includes("LOWER_LOW")
+    );
+    const lowerHigh = Boolean(
+        phaseAuth?.lower_high ??
+        execMeta.lower_high ??
+        snapDiag.lower_high ??
+        snapshot?.lower_high ??
+        recoveryEvidence.includes("LOWER_HIGH")
+    );
+
+    const reclaimConfirmed = Boolean(
+        execMeta.reclaimConfirmed === true ||
+        execMeta.reclaim_confirmed === true ||
+        snapDiag.reclaimConfirmed === true ||
+        snapDiag.reclaim_confirmed === true ||
+        snapshot?.reclaimConfirmed === true ||
+        snapshot?.reclaim_confirmed === true ||
+        recoveryEvidence.includes("RECLAIM_CONFIRMED") ||
+        recoveryEvidence.includes("BOX_MID_RECLAIMED")
+    );
+
+    const breakdownConfirmed = Boolean(
+        execMeta.breakdownConfirmed === true ||
+        execMeta.breakdown_confirmed === true ||
+        snapDiag.breakdownConfirmed === true ||
+        snapDiag.breakdown_confirmed === true ||
+        snapshot?.breakdownConfirmed === true ||
+        snapshot?.breakdown_confirmed === true ||
+        phaseAuth?.lower_breakdown_hold === true ||
+        recoveryEvidence.includes("BREAKDOWN_CONFIRMED") ||
+        recoveryEvidence.includes("LOWER_BREAKDOWN_HOLD")
+    );
+
+    const breakoutConfirmed = Boolean(
+        execMeta.breakoutConfirmed === true ||
+        execMeta.breakout_confirmed === true ||
+        snapDiag.breakoutConfirmed === true ||
+        snapDiag.breakout_confirmed === true ||
+        snapshot?.breakoutConfirmed === true ||
+        snapshot?.breakout_confirmed === true ||
+        phaseAuth?.upper_breakout_hold === true ||
+        recoveryEvidence.includes("BREAKOUT_CONFIRMED") ||
+        recoveryEvidence.includes("UPPER_BREAKOUT_HOLD")
+    );
+
+    const rejectionConfirmed = Boolean(
+        execMeta.rejectionConfirmed === true ||
+        execMeta.rejection_confirmed === true ||
+        snapDiag.rejectionConfirmed === true ||
+        recoveryEvidence.includes("REJECTION_CONFIRMED")
+    );
+
+    // Invalidation check (Overrides guard)
+    let recoveryInvalidated = false;
+    let freshContinuationConfirmed = false;
+
+    if (
+        execMeta.recovery_invalidated === true ||
+        snapDiag.recovery_invalidated === true ||
+        (recAuth != null && recAuth.recovery_confirmed === false)
+    ) {
+        recoveryInvalidated = true;
+    }
+
+    if (side === "short") {
+        const recoveryLow = Number(execMeta.recovery_low ?? execMeta.previous_low ?? snapDiag.recovery_low ?? 0);
+        const lowBreached = recoveryLow > 0 && lastPrice > 0 && lastPrice < recoveryLow;
+        const continuationStructure = Boolean(
+            execMeta.continuationConfirmed === true ||
+            execMeta.retestConfirmed === true ||
+            execMeta.continuationPhase === "RETEST_TOUCHED" ||
+            phaseAuth?.phase === "CONTINUATION" ||
+            execMeta.trend_continuation === true
+        );
+
+        if (
+            breakdownConfirmed ||
+            lowBreached ||
+            execMeta.fresh_breakdown === true ||
+            execMeta.fresh_breakdown_confirmed === true ||
+            execMeta.fresh_continuation_confirmed === true ||
+            (lowerLow && continuationStructure)
+        ) {
+            recoveryInvalidated = true;
+            freshContinuationConfirmed = true;
+        }
+    } else if (side === "long") {
+        const recoveryHigh = Number(execMeta.recovery_high ?? execMeta.previous_high ?? snapDiag.recovery_high ?? 0);
+        const highBreached = recoveryHigh > 0 && lastPrice > 0 && lastPrice > recoveryHigh;
+        const continuationStructure = Boolean(
+            execMeta.continuationConfirmed === true ||
+            execMeta.retestConfirmed === true ||
+            execMeta.continuationPhase === "RETEST_TOUCHED" ||
+            phaseAuth?.phase === "CONTINUATION" ||
+            execMeta.trend_continuation === true
+        );
+
+        if (
+            breakoutConfirmed ||
+            highBreached ||
+            execMeta.fresh_breakout === true ||
+            execMeta.fresh_breakout_confirmed === true ||
+            execMeta.fresh_continuation_confirmed === true ||
+            (higherHigh && continuationStructure)
+        ) {
+            recoveryInvalidated = true;
+            freshContinuationConfirmed = true;
+        }
+    }
+
+    let guardApplicable = false;
+    let oppositeRecoveryBlocked = false;
+
+    if (side === "short") {
+        // Strict opposite (long) recovery confirmed
+        if (
+            recoveryConfirmed &&
+            recoveryDirection === "long" &&
+            higherLow &&
+            higherHigh &&
+            reclaimConfirmed
+        ) {
+            guardApplicable = true;
+            if (!recoveryInvalidated) {
+                oppositeRecoveryBlocked = true;
+            }
+        }
+    } else if (side === "long") {
+        // Strict opposite (short) recovery confirmed
+        const symmetricRejectionOrBreakdown = breakdownConfirmed || rejectionConfirmed;
+        if (
+            recoveryConfirmed &&
+            recoveryDirection === "short" &&
+            lowerHigh &&
+            lowerLow &&
+            symmetricRejectionOrBreakdown
+        ) {
+            guardApplicable = true;
+            if (!recoveryInvalidated) {
+                oppositeRecoveryBlocked = true;
+            }
+        }
+    }
+
+    if (allowed && oppositeRecoveryBlocked) {
+        allowed = false;
+        finalDecision = "HOLD";
+        rejectReason = "OPPOSITE_RECOVERY_CONFIRMED_CHASE_BLOCKED";
+    }
+
     const proof = {
         event: "HIGHWAY_ENTRY_GATE_PROOF",
         symbol,
@@ -441,9 +644,23 @@ export function evaluateHighwayCoreEntryGate(input: HighwayEntryGateInput): High
         stopDistancePct: Number(stopDistancePct.toFixed(6)),
         rewardRisk: Number(rewardRisk.toFixed(3)),
         atrPct: Number(atrPct.toFixed(6)),
+        // Opposite Recovery Guard Evidence
+        opposite_recovery_guard_applicable: guardApplicable,
+        opposite_recovery_blocked: oppositeRecoveryBlocked,
+        recovery_confirmed: recoveryConfirmed,
+        recovery_direction: recoveryDirection,
+        higher_low: higherLow,
+        higher_high: higherHigh,
+        lower_high: lowerHigh,
+        lower_low: lowerLow,
+        reclaim_confirmed: reclaimConfirmed,
+        recovery_invalidated: recoveryInvalidated,
+        fresh_continuation_confirmed: freshContinuationConfirmed,
+        opposite_recovery_final_reason: oppositeRecoveryBlocked ? "OPPOSITE_RECOVERY_CONFIRMED_CHASE_BLOCKED" : null,
         finalDecision,
         rejectReason
     };
+
 
     console.info(JSON.stringify(proof));
 
